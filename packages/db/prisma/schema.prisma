@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Audit {
+  id         String      @id @default(cuid())
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  targetUrl  String
+  goal       String
+  status     AuditStatus @default(CREATED)
+  modes      Json
+  shareToken String?     @unique
+  runs       AgentRun[]
+  issues     Issue[]
+  events     EventLog[]
+  report     AuditReport?
+}
+
+enum AuditStatus {
+  CREATED
+  PREFLIGHT
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model AgentRun {
+  id         String      @id @default(cuid())
+  auditId    String
+  audit      Audit       @relation(fields: [auditId], references: [id])
+  persona    String
+  viewport   String
+  status     RunStatus   @default(PENDING)
+  startedAt  DateTime?
+  finishedAt DateTime?
+  success    Boolean?
+  summary    String?
+  steps      BrowserStep[]
+  artifacts  Artifact[]
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BLOCKED
+}
+
+model BrowserStep {
+  id            String   @id @default(cuid())
+  runId         String
+  run           AgentRun @relation(fields: [runId], references: [id])
+  stepIndex     Int
+  action        String
+  thought       String?
+  selector      String?
+  value         String?
+  url           String?
+  result        String
+  screenshotUrl String?
+  createdAt     DateTime @default(now())
+}
+
+model Issue {
+  id              String        @id @default(cuid())
+  auditId          String
+  audit            Audit         @relation(fields: [auditId], references: [id])
+  severity         IssueSeverity
+  category         String
+  title            String
+  description      String
+  evidenceStepIds  Json
+  suggestedFix     String?
+  generatedTest    String?
+  createdAt        DateTime      @default(now())
+}
+
+enum IssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Artifact {
+  id        String       @id @default(cuid())
+  runId     String
+  run       AgentRun     @relation(fields: [runId], references: [id])
+  type      ArtifactType
+  url       String
+  meta      Json?
+  createdAt DateTime     @default(now())
+}
+
+enum ArtifactType {
+  SCREENSHOT
+  TRACE_ZIP
+  HAR
+  CONSOLE_LOG
+  VIDEO
+}
+
+model AuditReport {
+  id         String   @id @default(cuid())
+  auditId    String   @unique
+  audit      Audit    @relation(fields: [auditId], references: [id])
+  summary    String
+  score      Int
+  reportJson Json
+  markdown   String
+  createdAt  DateTime @default(now())
+}
+
+model EventLog {
+  id        String   @id @default(cuid())
+  auditId   String?
+  audit     Audit?   @relation(fields: [auditId], references: [id])
+  name      String
+  props     Json?
+  createdAt DateTime @default(now())
+}

@@ -1,0 +1,16 @@
+{
+  "name": "swarmproof",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @swarmproof/web dev",
+    "build": "pnpm -r --if-present build",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "worker:dev": "pnpm --filter @swarmproof/browser-worker dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
