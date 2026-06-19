@@ -21,12 +21,15 @@ export type WorkerRunAgentRequest = {
   persona: PersonaConfig;
   maxSteps: number;
   callbackBaseUrl: string;
+  runMode?: "demo-target" | "external-public";
+  allowExternalFormSubmissions?: boolean;
 };
 
 export type WorkerStepCallback = {
   runId: string;
   stepIndex: number;
   action: string;
+  status?: "passed" | "warning" | "failed";
   thought?: string;
   result: string;
   screenshotBase64?: string;
@@ -52,4 +55,11 @@ export type WorkerCompleteCallback = {
   status?: "SUCCEEDED" | "FAILED" | "BLOCKED";
   issues?: WorkerIssueCallback[];
   artifacts?: Array<{ type: ArtifactKind | string; url: string; meta?: Record<string, string | number | boolean> }>;
+};
+
+export type WorkerHealthSummary = {
+  service: "swarmproof-browser-worker";
+  provider: "deterministic-demo" | "local-playwright";
+  playwrightAvailable: boolean;
+  personas: string[];
 };

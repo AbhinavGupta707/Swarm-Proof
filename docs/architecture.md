@@ -36,9 +36,9 @@ Node service for browser execution. Owns:
 - `packages/db`: Prisma schema plus DB client boundary.
 - `packages/testgen`: generated Playwright test helpers.
 
-## Current Scaffold State
+## Current Runtime State
 
-This scaffold intentionally starts with deterministic demo data so the product can be built and judged even before browser provider credentials exist. Replace demo data with DB-backed APIs and worker callbacks as workstreams land.
+The app keeps deterministic demo data and memory fallback so the judged `/demo-target` path remains reliable without external services. The browser worker now has a `local-playwright` provider that can drive `/demo-target` and perform conservative public URL observation when `BROWSER_WORKER_URL` and `BROWSER_PROVIDER=local-playwright` are configured. DB-backed persistence and durable object storage remain behind the repository/artifact boundary until their runtime adapters are enabled.
 
 ## Integration Rule
 

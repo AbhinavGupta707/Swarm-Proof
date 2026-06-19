@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   appendEvent,
+  blockWorkerAuditRun,
   completeWorkerRun,
   createAudit,
   createShare,
@@ -15,7 +16,8 @@ import {
   recordWorkerStep,
   resetMemoryStoreForTests,
   runPreflight,
-  startAuditRun
+  startAuditRun,
+  startWorkerAuditRun
 } from "./index";
 
 const baseUrl = "https://swarmproof.test";
@@ -149,6 +151,34 @@ test("worker callback contracts record steps, issues, events, and artifacts", ()
   assert.equal(summary.issues.some((issue) => issue.title === "Callback issue"), true);
   assert.equal((summary.artifacts?.length ?? 0) >= 2, true);
   assert.equal(getAuditEvents(created.audit.id).events.some((event) => event.name === "browser_step_completed"), true);
+});
+
+test("worker dispatch plans create running jobs without completing deterministic runs", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "/demo-target",
+    goal: "Sign up, create a project, invite a teammate.",
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  assert.equal(plan.requests.length, 3);
+  assert.deepEqual(plan.requests.map((request) => request.persona.mode).sort(), ["chaos", "mobile", "normal"]);
+  assert.equal(plan.requests.every((request) => request.runMode === "demo-target"), true);
+
+  const running = getAuditOverview(created.audit.id);
+  assert.equal(running.status, "RUNNING");
+  assert.equal(running.runs.every((run) => run.status === "RUNNING"), true);
+  assert.equal(running.jobs?.every((job) => job.status === "DISPATCHED"), true);
+
+  const blocked = blockWorkerAuditRun(created.audit.id, "Worker dispatch failed in test.");
+  assert.equal(blocked.status, "COMPLETED");
+  assert.equal(blocked.runs.every((run) => run.status === "BLOCKED"), true);
+  assert.equal(blocked.issues.some((issue) => issue.title === "Browser worker could not start"), true);
 });
 
 test("share, database status, and artifact status expose persistence-ready contracts", () => {

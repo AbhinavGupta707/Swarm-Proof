@@ -34,9 +34,12 @@ pnpm install
 pnpm dev
 ```
 
+For the local Playwright worker slice, see `docs/live-worker.md`.
+
 Useful checks:
 
 ```bash
+pnpm test
 pnpm lint
 pnpm typecheck
 pnpm build

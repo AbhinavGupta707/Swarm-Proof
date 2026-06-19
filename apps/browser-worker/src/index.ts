@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { defaultPersonas, type WorkerCompleteCallback, type WorkerRunAgentRequest, type WorkerStepCallback } from "@swarmproof/types";
+import { defaultPersonas, type WorkerCompleteCallback, type WorkerHealthSummary, type WorkerRunAgentRequest, type WorkerStepCallback } from "@swarmproof/types";
+import { runDeterministicAgent, type CallbackPoster } from "./deterministic-runner";
+import { isPlaywrightPackageAvailable, runLocalPlaywrightAgent } from "./local-playwright";
 
 const port = Number(process.env.PORT ?? 8787);
 
@@ -10,18 +12,21 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       return sendJson(response, 200, {
         ok: true,
-        data: {
-          service: "swarmproof-browser-worker",
-          provider: process.env.FIREWORKS_API_KEY ? "fireworks-ready" : "deterministic-demo",
-          personas: defaultPersonas.map((persona) => persona.mode)
-        }
+        data: workerHealth()
       });
     }
 
     if (request.method === "POST" && url.pathname === "/worker/run-agent") {
       const body = await readJson<WorkerRunAgentRequest>(request);
-      queueDeterministicRun(body);
-      return sendJson(response, 202, { ok: true, data: { accepted: true, provider: "deterministic-demo" } });
+      queueWorkerRun(body);
+      return sendJson(response, 202, {
+        ok: true,
+        data: {
+          accepted: true,
+          provider: activeProvider(),
+          runMode: body.runMode ?? "external-public"
+        }
+      });
     }
 
     return sendJson(response, 404, { ok: false, error: { code: "not_found", message: "Worker route not found." } });
@@ -33,112 +38,63 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, () => {
   console.log(`SwarmProof browser worker listening on http://localhost:${port}`);
+  console.log(`Provider: ${activeProvider()}`);
   console.log(`Registered personas: ${defaultPersonas.map((persona) => persona.mode).join(", ")}`);
 });
 
-function queueDeterministicRun(input: WorkerRunAgentRequest) {
+function queueWorkerRun(input: WorkerRunAgentRequest) {
   setTimeout(() => {
-    runDeterministicAgent(input).catch((error) => {
-      console.error("deterministic worker run failed", error);
+    runWorker(input).catch((error) => {
+      console.error("worker run failed", error);
     });
   }, 0);
 }
 
-async function runDeterministicAgent(input: WorkerRunAgentRequest) {
-  const steps = stepsFor(input);
-  for (const step of steps) {
-    await postCallback(`${input.callbackBaseUrl}/api/worker-callback/step`, step);
+async function runWorker(input: WorkerRunAgentRequest) {
+  const postCallback = callbackPoster(input.callbackBaseUrl);
+
+  if (activeProvider() === "local-playwright") {
+    try {
+      await runLocalPlaywrightAgent(input, postCallback);
+      return;
+    } catch (error) {
+      console.error("local Playwright run failed, falling back to deterministic runner", error);
+      await postCallback("step", {
+        runId: input.runId,
+        stepIndex: 0,
+        action: "worker_fallback",
+        status: "warning",
+        thought: "The local Playwright provider failed before completing the run.",
+        result: error instanceof Error ? error.message : "Unknown Playwright provider error."
+      });
+    }
   }
 
-  await postCallback(`${input.callbackBaseUrl}/api/worker-callback/complete`, completeFor(input, steps));
+  await runDeterministicAgent(input, postCallback);
 }
 
-function stepsFor(input: WorkerRunAgentRequest): WorkerStepCallback[] {
-  const mode = input.persona.mode;
-  const base = input.targetUrl;
-
-  if (mode === "mobile") {
-    return [
-      step(input.runId, 1, "goto", "Open the target on a mobile viewport.", "Demo target loaded.", base),
-      step(input.runId, 2, "click_text", "Start signup.", "Signup panel opened.", `${base}/signup`),
-      step(input.runId, 3, "inspect_viewport", "Find primary action.", "Create account CTA is below the visible mobile fold.", `${base}/signup`)
-    ];
-  }
-
-  if (mode === "chaos") {
-    return [
-      step(input.runId, 1, "goto", "Open signup quickly.", "Signup accepted demo credentials.", `${base}/signup`),
-      step(input.runId, 2, "double_click_text", "Double-click create project.", "Two duplicate projects appeared.", `${base}/projects/new`),
-      step(input.runId, 3, "fill_label", "Try invalid teammate email.", "Invite form produced a vague error.", `${base}/invite`)
-    ];
-  }
-
-  return [
-    step(input.runId, 1, "goto", "Open the product.", "Demo landing page loaded.", base),
-    step(input.runId, 2, "click_text", "Create a project.", "Project creation path opened.", `${base}/projects/new`),
-    step(input.runId, 3, "find_invite", "Find invite teammate action.", "Invite action is labeled Add people and is easy to miss.", `${base}/invite`)
-  ];
-}
-
-function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]): WorkerCompleteCallback {
-  const mode = input.persona.mode;
-  const evidenceStepIds = steps.map((item) => `${input.runId}:${item.stepIndex}`);
-
-  if (mode === "mobile") {
-    return {
-      runId: input.runId,
-      success: false,
-      status: "FAILED",
-      summary: "Mobile signup exposes the hidden CTA bug.",
-      issues: [{
-        severity: "HIGH",
-        category: "Mobile UX",
-        title: "Signup CTA is hidden on mobile",
-        description: "The fixed-height signup panel hides the submit action below the fold.",
-        evidenceStepIds,
-        suggestedFix: "Move the primary action into a sticky footer or let the panel scroll."
-      }]
-    };
-  }
-
-  if (mode === "chaos") {
-    return {
-      runId: input.runId,
-      success: false,
-      status: "FAILED",
-      summary: "Chaos input found duplicate project creation.",
-      issues: [{
-        severity: "MEDIUM",
-        category: "Form handling",
-        title: "Double submit creates duplicate projects",
-        description: "The create project button stays active while the request is pending.",
-        evidenceStepIds,
-        suggestedFix: "Disable submit while pending and make creation idempotent."
-      }]
-    };
-  }
-
+function workerHealth(): WorkerHealthSummary {
   return {
-    runId: input.runId,
-    success: false,
-    status: "BLOCKED",
-    summary: "The invite teammate CTA is ambiguous.",
-    issues: [{
-      severity: "MEDIUM",
-      category: "Information architecture",
-      title: "Invite teammate CTA is hard to recognize",
-      description: "The page uses Add people while the user goal is to invite a teammate.",
-      evidenceStepIds,
-      suggestedFix: "Rename the primary action to Invite teammate."
-    }]
+    service: "swarmproof-browser-worker",
+    provider: activeProvider(),
+    playwrightAvailable: isPlaywrightPackageAvailable(),
+    personas: defaultPersonas.map((persona) => persona.mode)
   };
 }
 
-function step(runId: string, stepIndex: number, action: string, thought: string, result: string, url: string): WorkerStepCallback {
-  return { runId, stepIndex, action, thought, result, url, screenshotUrl: frameUrl(action, result) };
+function activeProvider(): WorkerHealthSummary["provider"] {
+  return process.env.BROWSER_PROVIDER === "local-playwright" ? "local-playwright" : "deterministic-demo";
 }
 
-async function postCallback(url: string, body: WorkerStepCallback | WorkerCompleteCallback) {
+function callbackPoster(callbackBaseUrl: string): CallbackPoster {
+  const base = callbackBaseUrl.replace(/\/$/, "");
+
+  return async <T>(path: "step" | "complete", body: WorkerStepCallback | WorkerCompleteCallback) => {
+    return postCallback<T>(`${base}/api/worker-callback/${path}`, body);
+  };
+}
+
+async function postCallback<T>(url: string, body: WorkerStepCallback | WorkerCompleteCallback): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -148,6 +104,13 @@ async function postCallback(url: string, body: WorkerStepCallback | WorkerComple
   if (!response.ok) {
     throw new Error(`Callback failed: ${response.status} ${response.statusText}`);
   }
+
+  const payload = await response.json() as { ok?: boolean; data?: T; error?: { message?: string } };
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? "Callback failed.");
+  }
+
+  return payload.data as T;
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
@@ -162,14 +125,4 @@ async function readJson<T>(request: IncomingMessage): Promise<T> {
 function sendJson(response: ServerResponse, status: number, payload: unknown) {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(payload));
-}
-
-function frameUrl(action: string, result: string) {
-  const text = `${action}: ${result}`.slice(0, 90);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#eef4f1"/><rect x="44" y="52" width="872" height="436" rx="16" fill="#fff" stroke="#c9d6d1"/><text x="84" y="150" font-family="Arial" font-size="28" font-weight="700" fill="#10201b">Worker evidence frame</text><text x="84" y="218" font-family="Arial" font-size="20" fill="#3f5f55">${escapeXml(text)}</text></svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-function escapeXml(value: string) {
-  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char] ?? char);
 }

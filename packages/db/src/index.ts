@@ -14,7 +14,7 @@ import type {
   BrowserStepSummary,
   RunStatus
 } from "@swarmproof/types";
-import type { WorkerCompleteCallback, WorkerStepCallback } from "@swarmproof/types";
+import type { WorkerCompleteCallback, WorkerRunAgentRequest, WorkerStepCallback } from "@swarmproof/types";
 export { assertDatabaseConfigured, getPersistenceConfig } from "./client";
 
 type SafeProps = Record<string, string | number | boolean | null>;
@@ -92,6 +92,10 @@ function getActiveProvider(): AuditProvider {
   const configured = process.env.BROWSER_PROVIDER;
   if (configured === "demo" || configured === "local-playwright" || configured === "browserbase-stagehand") {
     return configured;
+  }
+
+  if (process.env.BROWSER_WORKER_URL) {
+    return "local-playwright";
   }
 
   return process.env.DATABASE_URL ? "prisma-ready" : "memory-demo-adapter";
@@ -211,6 +215,7 @@ export function startAuditRun(auditId: string) {
   }
 
   audit.status = "RUNNING";
+  audit.provider = audit.preflight.isDemoTarget ? "demo" : "memory-demo-adapter";
   touch(audit);
 
   const personas = audit.modes.map((mode) => personaForMode(mode));
@@ -227,6 +232,85 @@ export function startAuditRun(auditId: string) {
   generateAuditReport(audit.id);
 
   return audit.runs.map((run) => run.id);
+}
+
+export function startWorkerAuditRun(auditId: string, callbackBaseUrl: string) {
+  const audit = requireAudit(auditId);
+  if (!audit.preflight.loadable) {
+    throw new Error(audit.preflight.blockedReason ?? "Target preflight failed.");
+  }
+
+  if (audit.runs.length === 0) {
+    audit.status = "RUNNING";
+    audit.provider = "local-playwright";
+    touch(audit);
+
+    const personas = audit.modes.map((mode) => personaForMode(mode));
+    for (const persona of personas) {
+      const run = createRun(audit, persona);
+      run.status = "RUNNING";
+      run.startedAt = new Date().toISOString();
+      audit.runs.push(run);
+      createJob(audit, run.id, "DISPATCHED");
+      appendEvent("agent_run_started", audit.id, {
+        persona: persona.mode,
+        maxSteps: audit.maxSteps,
+        provider: "local-playwright",
+        worker: true
+      });
+    }
+  }
+
+  const requests = audit.runs
+    .filter((run) => !FINAL_RUN_STATUSES.includes(run.status))
+    .map((run): WorkerRunAgentRequest => ({
+      auditId: audit.id,
+      runId: run.id,
+      targetUrl: audit.normalizedUrl ?? audit.targetUrl,
+      goal: audit.goal,
+      persona: personaForMode(run.mode as PersonaMode),
+      maxSteps: audit.maxSteps,
+      callbackBaseUrl,
+      runMode: audit.preflight.isDemoTarget ? "demo-target" : "external-public",
+      allowExternalFormSubmissions: audit.preflight.isDemoTarget
+    }));
+
+  return {
+    runIds: audit.runs.map((run) => run.id),
+    requests,
+    provider: audit.provider
+  };
+}
+
+export function blockWorkerAuditRun(auditId: string, reason: string) {
+  const audit = requireAudit(auditId);
+
+  for (const run of audit.runs) {
+    if (FINAL_RUN_STATUSES.includes(run.status)) continue;
+    run.status = "BLOCKED";
+    run.success = false;
+    run.summary = reason;
+    run.finishedAt = new Date().toISOString();
+    finishJobForRun(audit, run);
+    appendEvent("persona_blocked", audit.id, {
+      persona: run.mode,
+      reason: "worker_dispatch_failed"
+    });
+  }
+
+  if (audit.runs.length > 0 && audit.issues.length === 0) {
+    addIssue(audit, {
+      severity: "MEDIUM",
+      category: "Execution setup",
+      title: "Browser worker could not start",
+      description: reason,
+      suggestedFix: "Check BROWSER_WORKER_URL, worker health, and Playwright browser installation."
+    });
+  }
+
+  completeAuditIfReady(audit);
+  generateAuditReport(audit.id);
+  return toSummary(audit);
 }
 
 export function getAudit(auditId: string) {
@@ -359,7 +443,7 @@ export function recordWorkerStep(input: WorkerStepCallback) {
   const step = addStep(run, {
     stepIndex: input.stepIndex,
     action: input.action,
-    status: "passed",
+    status: input.status ?? "passed",
     thought: input.thought,
     result: input.result,
     url: input.url,
@@ -583,6 +667,14 @@ function addIssue(audit: AuditRecord, issue: Omit<AuditIssueSummary, "id">) {
 
 function buildReportSummary(audit: AuditRecord) {
   if (!audit.preflight.isDemoTarget) {
+    if (audit.issues.some((issue) => issue.category === "Execution setup")) {
+      return "The target passed safety checks, but browser execution did not complete in this environment.";
+    }
+
+    if (audit.provider === "local-playwright") {
+      return "The local Playwright worker loaded the public target, collected evidence, and produced a safety-limited external URL report.";
+    }
+
     return "The target passed safety checks, but external browser execution is not configured in this demo build.";
   }
 
@@ -702,13 +794,13 @@ function normalizeModes(modes?: string[]): PersonaMode[] {
   return requested.length > 0 ? [...new Set(requested)] : ["normal", "mobile", "chaos"];
 }
 
-function createJob(audit: AuditRecord, runId?: string) {
+function createJob(audit: AuditRecord, runId?: string, status: AuditJobSummary["status"] = "DISPATCHED") {
   const now = new Date().toISOString();
   const job: AuditJobSummary = {
     id: createId("job"),
     auditId: audit.id,
     runId,
-    status: "DISPATCHED",
+    status,
     provider: audit.provider,
     attempts: 1,
     createdAt: now,
