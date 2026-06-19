@@ -111,7 +111,7 @@ export function auditTimeToValue(audit: AuditSummary) {
 }
 
 export function auditPreflightLabel(audit: AuditSummary) {
-  return audit.id === demoAudit.id ? demoAudit.preflight : audit.normalizedUrl ? "Safety preflight passed" : "Demo fallback";
+  return audit.id === demoAudit.id ? demoAudit.preflightLabel : audit.normalizedUrl ? "Safety preflight passed" : "Demo fallback";
 }
 
 function severityBreakdown(audit: AuditSummary) {

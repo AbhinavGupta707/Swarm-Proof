@@ -10,6 +10,7 @@
     "@swarmproof/types": "workspace:*"
   },
   "scripts": {
+    "test": "pnpm --filter @swarmproof/browser-worker exec node --import tsx --test ../../packages/db/src/contracts.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },

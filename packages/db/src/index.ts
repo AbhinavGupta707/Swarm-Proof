@@ -1,7 +1,12 @@
 import { defaultPersonas, type PersonaConfig, type PersonaMode } from "@swarmproof/types";
 import type {
+  ArtifactKind,
+  ArtifactSummary,
+  AuditJobSummary,
+  AuditProvider,
   AuditEventSummary,
   AuditIssueSummary,
+  AuditPreflightSummary,
   AuditReportSummary,
   AuditRunSummary,
   AuditStatus,
@@ -10,28 +15,29 @@ import type {
   RunStatus
 } from "@swarmproof/types";
 import type { WorkerCompleteCallback, WorkerStepCallback } from "@swarmproof/types";
+export { assertDatabaseConfigured, getPersistenceConfig } from "./client";
 
 type SafeProps = Record<string, string | number | boolean | null>;
 
-type PreflightResult = {
-  loadable: boolean;
-  blockedReason?: string;
-  normalizedUrl: string;
-  isDemoTarget: boolean;
-};
+type PreflightResult = AuditPreflightSummary;
 
-type AuditRecord = Omit<AuditSummary, "score" | "runs" | "issues" | "generatedTest" | "report"> & {
+type AuditRecord = Omit<AuditSummary, "score" | "runs" | "issues" | "generatedTest" | "report" | "artifacts" | "jobs" | "preflight"> & {
   modes: PersonaMode[];
   maxSteps: number;
+  provider: AuditProvider;
   preflight: PreflightResult;
   runs: AuditRunSummary[];
   issues: AuditIssueSummary[];
+  artifacts: ArtifactSummary[];
+  jobs: AuditJobSummary[];
   report?: AuditReportSummary;
 };
 
 type Store = {
   audits: Map<string, AuditRecord>;
   events: AuditEventSummary[];
+  artifacts: Map<string, ArtifactSummary>;
+  jobs: Map<string, AuditJobSummary>;
 };
 
 declare global {
@@ -44,16 +50,51 @@ const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED"];
 export function getDatabaseStatus() {
   return {
     configured: Boolean(process.env.DATABASE_URL),
-    provider: process.env.DATABASE_URL ? "postgres" : "memory-demo-adapter"
+    provider: getActiveProvider(),
+    activeAdapter: "memory",
+    dbBacked: false,
+    prismaReady: true,
+    note: process.env.DATABASE_URL
+      ? "DATABASE_URL is configured; Prisma schema and repository boundary are ready, but runtime still uses the memory fallback until Prisma client wiring is enabled."
+      : "DATABASE_URL is absent; using deterministic memory fallback."
   };
 }
 
 export function getStore(): Store {
   if (!globalThis.__swarmproofStore) {
-    globalThis.__swarmproofStore = { audits: new Map(), events: [] };
+    globalThis.__swarmproofStore = { audits: new Map(), events: [], artifacts: new Map(), jobs: new Map() };
   }
 
+  globalThis.__swarmproofStore.artifacts ??= new Map();
+  globalThis.__swarmproofStore.jobs ??= new Map();
+
   return globalThis.__swarmproofStore;
+}
+
+export function resetMemoryStoreForTests() {
+  globalThis.__swarmproofStore = { audits: new Map(), events: [], artifacts: new Map(), jobs: new Map() };
+}
+
+export function getArtifactStorageStatus() {
+  return {
+    provider: process.env.ARTIFACT_STORAGE_PROVIDER ?? "memory",
+    bucket: process.env.SUPABASE_STORAGE_BUCKET ?? process.env.R2_BUCKET ?? null,
+    durable: Boolean(process.env.ARTIFACT_STORAGE_PROVIDER && process.env.ARTIFACT_STORAGE_PROVIDER !== "memory"),
+    localFallback: true
+  };
+}
+
+export function getAuditArtifacts(auditId: string) {
+  return requireAudit(auditId).artifacts;
+}
+
+function getActiveProvider(): AuditProvider {
+  const configured = process.env.BROWSER_PROVIDER;
+  if (configured === "demo" || configured === "local-playwright" || configured === "browserbase-stagehand") {
+    return configured;
+  }
+
+  return process.env.DATABASE_URL ? "prisma-ready" : "memory-demo-adapter";
 }
 
 export function preflightTargetUrl(targetUrl: string, baseUrl: string): PreflightResult {
@@ -132,11 +173,14 @@ export function createAudit(input: {
     normalizedUrl: preflight.normalizedUrl,
     goal: input.goal.trim() || "Explore the product and identify the main user friction.",
     status: "CREATED",
+    provider: getActiveProvider(),
     modes,
     maxSteps: Math.max(3, Math.min(Number(input.maxSteps ?? 15), 30)),
     preflight,
     runs: [],
     issues: [],
+    artifacts: [],
+    jobs: [],
     eventCount: 0
   };
 
@@ -173,8 +217,10 @@ export function startAuditRun(auditId: string) {
   for (const persona of personas) {
     const run = createRun(audit, persona);
     audit.runs.push(run);
+    createJob(audit, run.id);
     appendEvent("agent_run_started", audit.id, { persona: persona.mode, maxSteps: audit.maxSteps });
     runDeterministicPersona(audit, run, persona);
+    finishJobForRun(audit, run);
   }
 
   completeAuditIfReady(audit);
@@ -300,13 +346,25 @@ export function appendEvent(name: string, auditId: string | undefined, props: Re
 
 export function recordWorkerStep(input: WorkerStepCallback) {
   const { audit, run } = requireRun(input.runId);
+  const screenshotUrl = input.screenshotUrl ?? (input.screenshotBase64 ? `data:image/png;base64,${input.screenshotBase64}` : undefined);
+  const artifact = screenshotUrl
+    ? createArtifact(audit, {
+        runId: run.id,
+        kind: "SCREENSHOT",
+        url: screenshotUrl,
+        contentType: screenshotUrl.startsWith("data:image/png") ? "image/png" : undefined,
+        meta: { stepIndex: input.stepIndex, source: "worker-callback" }
+      })
+    : undefined;
   const step = addStep(run, {
     stepIndex: input.stepIndex,
     action: input.action,
+    status: "passed",
     thought: input.thought,
     result: input.result,
     url: input.url,
-    screenshotUrl: input.screenshotUrl ?? (input.screenshotBase64 ? `data:image/png;base64,${input.screenshotBase64}` : undefined)
+    screenshotUrl,
+    artifactId: input.artifactId ?? artifact?.id
   });
   run.status = "RUNNING";
   touch(audit);
@@ -333,12 +391,22 @@ export function completeWorkerRun(input: WorkerCompleteCallback) {
     });
   }
 
+  for (const artifact of input.artifacts ?? []) {
+    createArtifact(audit, {
+      runId: run.id,
+      kind: normalizeArtifactKind(artifact.type),
+      url: artifact.url,
+      meta: artifact.meta
+    });
+  }
+
   appendEvent(input.success ? "run_completed" : "persona_blocked", audit.id, {
     persona: run.mode,
     success: input.success,
     issueCount: input.issues?.length ?? 0
   });
   completeAuditIfReady(audit);
+  finishJobForRun(audit, run);
   generateAuditReport(audit.id);
   return toSummary(audit);
 }
@@ -570,6 +638,7 @@ function calculateScore(audit: AuditRecord) {
 function completeAuditIfReady(audit: AuditRecord) {
   if (audit.runs.length > 0 && audit.runs.every((run) => FINAL_RUN_STATUSES.includes(run.status))) {
     audit.status = "COMPLETED";
+    audit.completedAt = new Date().toISOString();
     touch(audit);
   }
 }
@@ -582,10 +651,18 @@ function toSummary(audit: AuditRecord): AuditSummary {
     normalizedUrl: audit.normalizedUrl,
     goal: audit.goal,
     status: audit.status,
+    provider: audit.provider,
+    maxSteps: audit.maxSteps,
+    preflight: audit.preflight,
+    errorCode: audit.errorCode,
+    errorMessage: audit.errorMessage,
+    completedAt: audit.completedAt,
     score: report?.score ?? calculateScore(audit),
     shareToken: audit.shareToken,
     runs: audit.runs,
     issues: audit.issues,
+    artifacts: audit.artifacts,
+    jobs: audit.jobs,
     generatedTest: report?.reportJson.playwrightTests[0]?.code ?? buildGeneratedTest(audit),
     report,
     eventCount: audit.eventCount,
@@ -623,6 +700,74 @@ function normalizeModes(modes?: string[]): PersonaMode[] {
     .map((mode) => mode.replace("-", "_"))
     .filter((mode): mode is PersonaMode => ["normal", "mobile", "impatient", "chaos", "accessibility_lite"].includes(mode));
   return requested.length > 0 ? [...new Set(requested)] : ["normal", "mobile", "chaos"];
+}
+
+function createJob(audit: AuditRecord, runId?: string) {
+  const now = new Date().toISOString();
+  const job: AuditJobSummary = {
+    id: createId("job"),
+    auditId: audit.id,
+    runId,
+    status: "DISPATCHED",
+    provider: audit.provider,
+    attempts: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+  audit.jobs.push(job);
+  getStore().jobs.set(job.id, job);
+  return job;
+}
+
+function finishJobForRun(audit: AuditRecord, run: AuditRunSummary) {
+  const job = audit.jobs.find((candidate) => candidate.runId === run.id);
+  if (!job) return;
+
+  job.status = run.status === "SUCCEEDED" ? "SUCCEEDED" : run.status === "FAILED" || run.status === "BLOCKED" ? "FAILED" : "RUNNING";
+  job.updatedAt = new Date().toISOString();
+  if (run.status === "FAILED" || run.status === "BLOCKED") {
+    job.lastError = run.summary;
+  }
+}
+
+function createArtifact(
+  audit: AuditRecord,
+  input: {
+    runId?: string;
+    kind: ArtifactKind;
+    url: string;
+    storageKey?: string;
+    contentType?: string;
+    sizeBytes?: number;
+    meta?: Record<string, string | number | boolean | null>;
+  }
+) {
+  const artifact: ArtifactSummary = {
+    id: createId("artifact"),
+    auditId: audit.id,
+    runId: input.runId,
+    kind: input.kind,
+    url: input.url,
+    storageKey: input.storageKey,
+    contentType: input.contentType,
+    sizeBytes: input.sizeBytes,
+    meta: input.meta,
+    createdAt: new Date().toISOString()
+  };
+
+  audit.artifacts.push(artifact);
+  const run = input.runId ? audit.runs.find((candidate) => candidate.id === input.runId) : undefined;
+  if (run) {
+    run.artifacts = [...(run.artifacts ?? []), artifact];
+  }
+  getStore().artifacts.set(artifact.id, artifact);
+  return artifact;
+}
+
+function normalizeArtifactKind(value: string): ArtifactKind {
+  return ["SCREENSHOT", "TRACE_ZIP", "HAR", "CONSOLE_LOG", "NETWORK_LOG", "VIDEO"].includes(value)
+    ? value as ArtifactKind
+    : "SCREENSHOT";
 }
 
 function personaForMode(mode: PersonaMode): PersonaConfig {

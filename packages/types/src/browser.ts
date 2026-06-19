@@ -1,5 +1,5 @@
 import type { PersonaConfig } from "./agent";
-import type { IssueSeverity } from "./audit";
+import type { ArtifactKind, IssueSeverity } from "./audit";
 
 export type AgentAction =
   | { type: "click_text"; text: string; reason: string }
@@ -31,6 +31,7 @@ export type WorkerStepCallback = {
   result: string;
   screenshotBase64?: string;
   screenshotUrl?: string;
+  artifactId?: string;
   url?: string;
 };
 
@@ -50,5 +51,5 @@ export type WorkerCompleteCallback = {
   summary: string;
   status?: "SUCCEEDED" | "FAILED" | "BLOCKED";
   issues?: WorkerIssueCallback[];
-  artifacts?: Array<{ type: string; url: string; meta?: Record<string, string | number | boolean> }>;
+  artifacts?: Array<{ type: ArtifactKind | string; url: string; meta?: Record<string, string | number | boolean> }>;
 };

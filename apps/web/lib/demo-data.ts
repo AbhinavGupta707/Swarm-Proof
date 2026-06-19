@@ -37,7 +37,7 @@ export const demoAudit: AuditSummary & {
   result: "Partial pass";
   successRate: string;
   timeToValue: string;
-  preflight: string;
+  preflightLabel: string;
   metrics: Array<{ label: string; value: string; detail: string }>;
   steps: DemoStep[];
   evidenceFrames: DemoEvidenceFrame[];
@@ -56,7 +56,7 @@ export const demoAudit: AuditSummary & {
   result: "Partial pass",
   successRate: "0 / 3 clean passes",
   timeToValue: "2m 08s to first blocker",
-  preflight: "Public route, no credentials, deterministic demo runner",
+  preflightLabel: "Public route, no credentials, deterministic demo runner",
   metrics: [
     { label: "Personas", value: "3", detail: "Normal, mobile, chaos" },
     { label: "Evidence frames", value: "9", detail: "Screenshot-style states captured" },

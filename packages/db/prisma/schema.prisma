@@ -8,18 +8,27 @@ datasource db {
 }
 
 model Audit {
-  id         String      @id @default(cuid())
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
-  targetUrl  String
-  goal       String
-  status     AuditStatus @default(CREATED)
-  modes      Json
-  shareToken String?     @unique
-  runs       AgentRun[]
-  issues     Issue[]
-  events     EventLog[]
-  report     AuditReport?
+  id            String      @id @default(cuid())
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  completedAt   DateTime?
+  targetUrl     String
+  normalizedUrl String?
+  goal          String
+  status        AuditStatus @default(CREATED)
+  provider      String      @default("memory-demo-adapter")
+  modes         Json
+  maxSteps      Int         @default(15)
+  preflightJson Json?
+  errorCode     String?
+  errorMessage  String?
+  shareToken    String?     @unique
+  runs          AgentRun[]
+  issues        Issue[]
+  artifacts     Artifact[]
+  jobs          AuditJob[]
+  events        EventLog[]
+  report        AuditReport?
 }
 
 enum AuditStatus {
@@ -36,6 +45,7 @@ model AgentRun {
   auditId    String
   audit      Audit       @relation(fields: [auditId], references: [id])
   persona    String
+  mode       String      @default("normal")
   viewport   String
   status     RunStatus   @default(PENDING)
   startedAt  DateTime?
@@ -60,12 +70,14 @@ model BrowserStep {
   run           AgentRun @relation(fields: [runId], references: [id])
   stepIndex     Int
   action        String
+  status        String?
   thought       String?
   selector      String?
   value         String?
   url           String?
   result        String
   screenshotUrl String?
+  artifactId    String?
   createdAt     DateTime @default(now())
 }
 
@@ -91,13 +103,18 @@ enum IssueSeverity {
 }
 
 model Artifact {
-  id        String       @id @default(cuid())
-  runId     String
-  run       AgentRun     @relation(fields: [runId], references: [id])
-  type      ArtifactType
-  url       String
-  meta      Json?
-  createdAt DateTime     @default(now())
+  id          String       @id @default(cuid())
+  auditId     String?
+  audit       Audit?       @relation(fields: [auditId], references: [id])
+  runId       String?
+  run         AgentRun?    @relation(fields: [runId], references: [id])
+  type        ArtifactType
+  url         String
+  storageKey  String?
+  contentType String?
+  sizeBytes   Int?
+  meta        Json?
+  createdAt   DateTime     @default(now())
 }
 
 enum ArtifactType {
@@ -105,7 +122,31 @@ enum ArtifactType {
   TRACE_ZIP
   HAR
   CONSOLE_LOG
+  NETWORK_LOG
   VIDEO
+}
+
+model AuditJob {
+  id        String         @id @default(cuid())
+  auditId   String
+  audit     Audit          @relation(fields: [auditId], references: [id])
+  runId     String?
+  status    AuditJobStatus @default(QUEUED)
+  provider  String
+  attempts  Int            @default(0)
+  lockedAt  DateTime?
+  lastError String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+enum AuditJobStatus {
+  QUEUED
+  DISPATCHED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
 }
 
 model AuditReport {
