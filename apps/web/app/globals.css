@@ -23,8 +23,11 @@ html {
 
 body {
   margin: 0;
-  background: #f7f7fb;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 247, 251, 0.98) 18rem),
+    #f7f7fb;
   color: #161627;
+  font-feature-settings: "ss01" on, "cv01" on;
 }
 
 a {
@@ -60,4 +63,11 @@ a {
 
 .section {
   padding-block: var(--section-y);
+}
+
+.surface-grid {
+  background-image:
+    linear-gradient(rgba(22, 22, 39, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 22, 39, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
 }
