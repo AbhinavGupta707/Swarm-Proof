@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { Eye, FileCode2, LockKeyhole, ShieldCheck } from "lucide-react";
+import { Events } from "@swarmproof/events";
+import { TrackPageEvent } from "@/app/track-page-event";
 import { auditMetrics } from "@/lib/audit-presenters";
 import { getSharedAuditForPage } from "@/lib/audit-data";
 
@@ -12,6 +14,14 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
 
   return (
     <main className="section">
+      <TrackPageEvent
+        name={Events.ShareCreated}
+        props={{
+          target_kind: audit.preflight?.isDemoTarget ? "demo" : "public",
+          issue_count: audit.issues.length,
+          public_report: true
+        }}
+      />
       <div className="page-shell">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>

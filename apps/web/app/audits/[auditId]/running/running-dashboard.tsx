@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, CircleStop, Clock3, Eye, Loader2, Monitor, RefreshCw, Smartphone, Zap } from "lucide-react";
+import { Events, trackEvent, type EventName } from "@swarmproof/events";
 import type {
   ArtifactSummary,
   AuditEventSummary,
@@ -68,6 +69,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
   const [eventCount, setEventCount] = useState(initialEventCount || initialAudit.eventCount || 0);
   const [pollError, setPollError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(initialAudit.updatedAt ?? "");
+  const mirroredEventIds = useRef(new Set<string>());
 
   const hasActiveRun = audit.status === "RUNNING" || audit.runs.some((run) => run.status === "RUNNING" || run.status === "PENDING");
   const timeline = useMemo(() => auditTimeline(audit), [audit]);
@@ -87,6 +89,18 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
 
         if (cancelled) return;
         const data = payload.data;
+        for (const event of data.events) {
+          if (mirroredEventIds.current.has(event.id) || !isTrackableEventName(event.name)) {
+            continue;
+          }
+
+          mirroredEventIds.current.add(event.id);
+          trackEvent(event.name, {
+            ...event.props,
+            target_kind: data.preflight?.isDemoTarget ? "demo" : "public"
+          });
+        }
+
         setAudit((current) => ({
           ...current,
           status: data.status,
@@ -247,6 +261,10 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
       </div>
     </main>
   );
+}
+
+function isTrackableEventName(name: string): name is EventName {
+  return (Object.values(Events) as string[]).includes(name);
 }
 
 function EvidencePlaceholder({ mode, status }: { mode: AuditRunSummary["mode"]; status: RunStatus }) {

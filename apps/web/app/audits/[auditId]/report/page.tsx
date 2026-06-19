@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, Download, FileCode2, Share2, Sparkles } from "lucide-react";
 import { createShare } from "@swarmproof/db";
+import { Events } from "@swarmproof/events";
+import { TrackPageEvent } from "@/app/track-page-event";
 import { auditPreflightLabel, auditSuccessRate, auditTimeToValue, bugReportForAudit, suggestedFixesForAudit } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
@@ -28,6 +30,16 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
 
   return (
     <main className="section">
+      <TrackPageEvent
+        name={Events.ReportGenerated}
+        props={{
+          target_kind: audit.preflight?.isDemoTarget ? "demo" : "public",
+          issue_count: audit.issues.length,
+          persona_count: audit.runs.length,
+          score: audit.score,
+          outcome: report?.outcome ?? audit.status
+        }}
+      />
       <div className="page-shell">
         <div className="flex flex-wrap justify-between gap-4">
           <div>
