@@ -365,6 +365,7 @@ test("worker dispatch plans create queued runs without completing deterministic 
   assert.equal(plan.requests.length, 3);
   assert.deepEqual(plan.requests.map((request) => request.persona.mode).sort(), ["chaos", "mobile", "normal"]);
   assert.equal(plan.requests.every((request) => request.runMode === "demo-target"), true);
+  assert.equal(plan.requests.every((request) => request.timeoutMs === 65_000), true);
 
   const running = getAuditOverview(created.audit.id);
   assert.equal(running.status, "RUNNING");

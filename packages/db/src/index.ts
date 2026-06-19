@@ -843,7 +843,7 @@ export function startWorkerAuditRun(auditId: string, callbackBaseUrl: string) {
       goal: audit.goal,
       persona: personaForMode(run.mode as PersonaMode),
       maxSteps: audit.maxSteps,
-      timeoutMs: personaTimeoutMs(),
+      timeoutMs: workerPersonaTimeoutMs(),
       callbackBaseUrl,
       runMode: audit.preflight.isDemoTarget ? "demo-target" : "external-public",
       allowExternalFormSubmissions: audit.preflight.isDemoTarget
@@ -1901,6 +1901,10 @@ function touch(audit: AuditRecord) {
 
 function personaTimeoutMs() {
   return positiveEnvNumber("SWARMPROOF_PERSONA_TIMEOUT_MS", DEFAULT_PERSONA_TIMEOUT_MS);
+}
+
+function workerPersonaTimeoutMs() {
+  return Math.max(10_000, personaTimeoutMs() - 10_000);
 }
 
 function auditTimeoutMs(runCount: number) {

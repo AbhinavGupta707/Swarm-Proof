@@ -50,23 +50,21 @@ function queueWorkerRun(input: WorkerRunAgentRequest) {
 }
 
 async function drainWorkerQueue() {
-  if (activeRunCount > 0) {
-    return;
-  }
+  while (activeRunCount < workerConcurrency()) {
+    const next = queuedRuns.shift();
+    if (!next) {
+      return;
+    }
 
-  const next = queuedRuns.shift();
-  if (!next) {
-    return;
-  }
-
-  activeRunCount = 1;
-  try {
-    await runQueuedWorker(next);
-  } catch (error) {
-    console.error("worker run failed", error);
-  } finally {
-    activeRunCount = 0;
-    void drainWorkerQueue();
+    activeRunCount += 1;
+    void runQueuedWorker(next)
+      .catch((error) => {
+        console.error("worker run failed", error);
+      })
+      .finally(() => {
+        activeRunCount = Math.max(0, activeRunCount - 1);
+        void drainWorkerQueue();
+      });
   }
 }
 
@@ -223,6 +221,12 @@ function workerTimeoutMs(input: WorkerRunAgentRequest) {
   const fallback = input.runMode === "demo-target" ? 45_000 : 75_000;
   const requested = Number(input.timeoutMs ?? process.env.WORKER_PERSONA_TIMEOUT_MS ?? fallback);
   return Number.isFinite(requested) && requested > 0 ? requested : fallback;
+}
+
+function workerConcurrency() {
+  const requested = Number(process.env.WORKER_CONCURRENCY ?? 3);
+  if (!Number.isFinite(requested)) return 3;
+  return Math.max(1, Math.min(3, Math.floor(requested)));
 }
 
 function safeWorkerError(error: unknown) {
