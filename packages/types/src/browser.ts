@@ -26,6 +26,7 @@ export type WorkerRunAgentRequest = {
 };
 
 export type WorkerStepCallback = {
+  auditId?: string;
   runId: string;
   stepIndex: number;
   action: string;
@@ -49,6 +50,7 @@ export type WorkerIssueCallback = {
 };
 
 export type WorkerCompleteCallback = {
+  auditId?: string;
   runId: string;
   success: boolean;
   summary: string;

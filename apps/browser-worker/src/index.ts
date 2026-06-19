@@ -60,6 +60,7 @@ async function runWorker(input: WorkerRunAgentRequest) {
     } catch (error) {
       console.error("local Playwright run failed, falling back to deterministic runner", error);
       await postCallback("step", {
+        auditId: input.auditId,
         runId: input.runId,
         stepIndex: 0,
         action: "worker_fallback",

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileCode2, Share2, Sparkles } from "lucide-react";
-import { createShare } from "@swarmproof/db";
+import { createShareAsync } from "@swarmproof/db";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
 import { BugReportDownloadLink } from "./bug-report-download";
@@ -18,10 +18,10 @@ const severityStyles = {
 
 export default async function ReportPage({ params }: { params: Promise<{ auditId: string }> }) {
   const { auditId } = await params;
-  const audit = getAuditForPage(auditId);
+  const audit = await getAuditForPage(auditId);
   let share = { shareToken: audit.shareToken ?? "demo-share" };
   try {
-    share = audit.id === auditId ? createShare(audit.id, process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000") : share;
+    share = audit.id === auditId ? await createShareAsync(audit.id, process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000") : share;
   } catch {
     share = { shareToken: audit.shareToken ?? "demo-share" };
   }

@@ -1,4 +1,4 @@
-import { createAudit } from "@swarmproof/db";
+import { createAuditAsync } from "@swarmproof/db";
 import { fail, getBaseUrl, handleApiError, ok, readJson } from "../_lib";
 import type { NextRequest } from "next/server";
 
@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
       return fail("bad_request", "targetUrl is required.");
     }
 
-    const result = createAudit({ targetUrl, goal, modes, maxSteps, baseUrl: getBaseUrl(request) });
+    const result = await createAuditAsync({ targetUrl, goal, modes, maxSteps, baseUrl: getBaseUrl(request) });
     if (!result.ok) {
       return fail("unsafe_target_url", result.error, 400);
     }

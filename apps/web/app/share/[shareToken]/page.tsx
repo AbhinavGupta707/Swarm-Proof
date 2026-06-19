@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function SharePage({ params }: { params: Promise<{ shareToken: string }> }) {
   const { shareToken } = await params;
-  const audit = getSharedAuditForPage(shareToken);
+  const audit = await getSharedAuditForPage(shareToken);
   const metrics = auditMetrics(audit);
 
   return (

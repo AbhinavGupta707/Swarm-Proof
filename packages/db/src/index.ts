@@ -1,6 +1,7 @@
 import { defaultPersonas, type PersonaConfig, type PersonaMode } from "@swarmproof/types";
 import { createAiProvider, reportSystemPrompt } from "@swarmproof/ai";
 import { buildEvidencePlaywrightTest } from "@swarmproof/testgen";
+import { Pool, type PoolClient } from "pg";
 import type {
   ArtifactKind,
   ArtifactSummary,
@@ -63,22 +64,32 @@ type Store = {
   jobs: Map<string, AuditJobSummary>;
 };
 
+type AuditSnapshot = {
+  version: 1;
+  audit: AuditRecord;
+  events: AuditEventSummary[];
+  savedAt: string;
+};
+
 declare global {
   var __swarmproofStore: Store | undefined;
+  var __swarmproofPgPool: Pool | undefined;
+  var __swarmproofPgReady: Promise<void> | undefined;
 }
 
 const UNSAFE_EVENT_KEYS = ["url", "content", "screenshot", "secret", "token", "password", "email", "credential"];
 const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED"];
 
 export function getDatabaseStatus() {
+  const dbBacked = shouldUsePostgresPersistence();
   return {
     configured: Boolean(process.env.DATABASE_URL),
     provider: getActiveProvider(),
-    activeAdapter: "memory",
-    dbBacked: false,
+    activeAdapter: dbBacked ? "postgres" : "memory",
+    dbBacked,
     prismaReady: true,
-    note: process.env.DATABASE_URL
-      ? "DATABASE_URL is configured; Prisma schema and repository boundary are ready, but runtime still uses the memory fallback until Prisma client wiring is enabled."
+    note: dbBacked
+      ? "DATABASE_URL is configured; using the Postgres audit snapshot adapter with memory fallback for local tests."
       : "DATABASE_URL is absent; using deterministic memory fallback."
   };
 }
@@ -109,6 +120,280 @@ export function getArtifactStorageStatus() {
 
 export function getAuditArtifacts(auditId: string) {
   return requireAudit(auditId).artifacts;
+}
+
+export async function createAuditAsync(input: {
+  targetUrl: string;
+  goal: string;
+  modes?: string[];
+  maxSteps?: number;
+  baseUrl: string;
+}) {
+  const result = createAudit(input);
+  if (result.ok) {
+    await saveAuditSnapshot(result.audit.id);
+  }
+  return result;
+}
+
+export async function runPreflightAsync(auditId: string) {
+  return mutatePersistedAudit(auditId, () => runPreflight(auditId));
+}
+
+export async function startAuditRunAsync(auditId: string) {
+  return mutatePersistedAudit(auditId, () => startAuditRun(auditId));
+}
+
+export async function startWorkerAuditRunAsync(auditId: string, callbackBaseUrl: string) {
+  return mutatePersistedAudit(auditId, () => startWorkerAuditRun(auditId, callbackBaseUrl));
+}
+
+export async function blockWorkerAuditRunAsync(auditId: string, reason: string) {
+  return mutatePersistedAudit(auditId, () => blockWorkerAuditRun(auditId, reason));
+}
+
+export async function getAuditOverviewAsync(auditId: string) {
+  return readPersistedAudit(auditId, () => getAuditOverview(auditId));
+}
+
+export async function getAuditEventsAsync(auditId: string) {
+  return readPersistedAudit(auditId, () => getAuditEvents(auditId));
+}
+
+export async function generateAuditReportAsync(auditId: string) {
+  return mutatePersistedAudit(auditId, () => generateAuditReport(auditId));
+}
+
+export async function createShareAsync(auditId: string, baseUrl: string) {
+  return mutatePersistedAudit(auditId, () => createShare(auditId, baseUrl));
+}
+
+export async function getSharedReportAsync(shareToken: string) {
+  if (!shouldUsePostgresPersistence()) {
+    return getSharedReport(shareToken);
+  }
+
+  const snapshot = await readSnapshotByShareToken(shareToken);
+  if (snapshot) {
+    restoreSnapshot(snapshot);
+    return toSummary(snapshot.audit);
+  }
+
+  return shareToken === "demo-share" ? getSharedReport(shareToken) : undefined;
+}
+
+export async function recordWorkerStepAsync(input: WorkerStepCallback) {
+  const auditId = input.auditId ?? await findPersistedAuditIdForRun(input.runId);
+  return mutatePersistedAudit(auditId, () => recordWorkerStep(input));
+}
+
+export async function completeWorkerRunAsync(input: WorkerCompleteCallback) {
+  const auditId = input.auditId ?? await findPersistedAuditIdForRun(input.runId);
+  return mutatePersistedAudit(auditId, () => completeWorkerRun(input));
+}
+
+async function readPersistedAudit<T>(auditId: string, operation: () => T): Promise<T> {
+  if (!shouldUsePostgresPersistence()) {
+    return operation();
+  }
+
+  const snapshot = await readSnapshotByAuditId(auditId);
+  if (!snapshot) {
+    throw new Error("Audit not found.");
+  }
+
+  restoreSnapshot(snapshot);
+  return operation();
+}
+
+async function mutatePersistedAudit<T>(auditId: string, operation: () => T): Promise<T> {
+  if (!shouldUsePostgresPersistence()) {
+    return operation();
+  }
+
+  await ensurePostgresPersistence();
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [auditId]);
+
+    const snapshot = await readSnapshotByAuditId(auditId, client);
+    if (!snapshot) {
+      throw new Error("Audit not found.");
+    }
+    restoreSnapshot(snapshot);
+
+    const result = operation();
+    await writeSnapshot(client, auditId);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveAuditSnapshot(auditId: string) {
+  if (!shouldUsePostgresPersistence()) {
+    return;
+  }
+
+  await ensurePostgresPersistence();
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [auditId]);
+    await writeSnapshot(client, auditId);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readSnapshotByAuditId(auditId: string, client?: PoolClient): Promise<AuditSnapshot | undefined> {
+  if (!shouldUsePostgresPersistence()) {
+    return undefined;
+  }
+
+  await ensurePostgresPersistence();
+  const runner = client ?? getPostgresPool();
+  const result = await runner.query<{ data: AuditSnapshot | string }>(
+    "SELECT data FROM swarmproof_audit_snapshots WHERE id = $1 LIMIT 1",
+    [auditId]
+  );
+  return parseSnapshot(result.rows[0]?.data);
+}
+
+async function readSnapshotByShareToken(shareToken: string): Promise<AuditSnapshot | undefined> {
+  await ensurePostgresPersistence();
+  const result = await getPostgresPool().query<{ data: AuditSnapshot | string }>(
+    "SELECT data FROM swarmproof_audit_snapshots WHERE share_token = $1 LIMIT 1",
+    [shareToken]
+  );
+  return parseSnapshot(result.rows[0]?.data);
+}
+
+async function findPersistedAuditIdForRun(runId: string): Promise<string> {
+  if (!shouldUsePostgresPersistence()) {
+    const match = [...getStore().audits.values()].find((audit) => audit.runs.some((run) => run.id === runId));
+    if (!match) throw new Error("Run not found.");
+    return match.id;
+  }
+
+  await ensurePostgresPersistence();
+  const result = await getPostgresPool().query<{ id: string }>(
+    "SELECT id FROM swarmproof_audit_snapshots WHERE (data->'audit'->'runs') @> $1::jsonb LIMIT 1",
+    [JSON.stringify([{ id: runId }])]
+  );
+  const auditId = result.rows[0]?.id;
+  if (!auditId) {
+    throw new Error("Run not found.");
+  }
+  return auditId;
+}
+
+async function writeSnapshot(client: PoolClient, auditId: string) {
+  const audit = getStore().audits.get(auditId);
+  if (!audit) {
+    throw new Error("Audit not found.");
+  }
+
+  const snapshot: AuditSnapshot = {
+    version: 1,
+    audit,
+    events: getStore().events.filter((event) => event.auditId === auditId),
+    savedAt: new Date().toISOString()
+  };
+
+  await client.query(
+    `INSERT INTO swarmproof_audit_snapshots (id, share_token, data, updated_at)
+     VALUES ($1, $2, $3::jsonb, now())
+     ON CONFLICT (id) DO UPDATE SET
+       share_token = EXCLUDED.share_token,
+       data = EXCLUDED.data,
+       updated_at = now()`,
+    [audit.id, audit.shareToken ?? null, JSON.stringify(snapshot)]
+  );
+}
+
+function parseSnapshot(value: AuditSnapshot | string | undefined): AuditSnapshot | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return typeof value === "string" ? JSON.parse(value) as AuditSnapshot : value;
+}
+
+function restoreSnapshot(snapshot: AuditSnapshot) {
+  const store = getStore();
+  const audit = snapshot.audit;
+  store.audits.set(audit.id, audit);
+  store.events = store.events.filter((event) => event.auditId !== audit.id).concat(snapshot.events ?? []);
+
+  for (const artifact of audit.artifacts ?? []) {
+    store.artifacts.set(artifact.id, artifact);
+  }
+  for (const job of audit.jobs ?? []) {
+    store.jobs.set(job.id, job);
+  }
+}
+
+async function ensurePostgresPersistence() {
+  if (!shouldUsePostgresPersistence()) {
+    return;
+  }
+
+  globalThis.__swarmproofPgReady ??= (async () => {
+    const pool = getPostgresPool();
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS swarmproof_audit_snapshots (
+        id text PRIMARY KEY,
+        share_token text UNIQUE,
+        data jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await pool.query("CREATE INDEX IF NOT EXISTS swarmproof_audit_snapshots_share_token_idx ON swarmproof_audit_snapshots (share_token) WHERE share_token IS NOT NULL");
+    await pool.query("CREATE INDEX IF NOT EXISTS swarmproof_audit_snapshots_data_gin_idx ON swarmproof_audit_snapshots USING gin (data)");
+  })();
+
+  await globalThis.__swarmproofPgReady;
+}
+
+function getPostgresPool() {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required for Postgres persistence.");
+  }
+
+  globalThis.__swarmproofPgPool ??= new Pool({
+    connectionString: databaseUrl,
+    max: Number(process.env.SWARM_DB_POOL_MAX ?? 3),
+    ssl: shouldUseDatabaseSsl(databaseUrl) ? { rejectUnauthorized: false } : undefined
+  });
+  return globalThis.__swarmproofPgPool;
+}
+
+function shouldUsePostgresPersistence() {
+  return Boolean(process.env.DATABASE_URL) && process.env.SWARMPROOF_PERSISTENCE !== "memory";
+}
+
+function shouldUseDatabaseSsl(databaseUrl: string) {
+  if (/sslmode=disable/i.test(databaseUrl)) {
+    return false;
+  }
+
+  try {
+    const host = new URL(databaseUrl).hostname;
+    return !["localhost", "127.0.0.1", "::1"].includes(host);
+  } catch {
+    return true;
+  }
 }
 
 function getActiveProvider(): AuditProvider {

@@ -344,6 +344,7 @@ async function emitStep(
   }
 ) {
   const payload: WorkerStepCallback = {
+    auditId: input.auditId,
     runId: input.runId,
     stepIndex: step.stepIndex,
     action: step.action,
@@ -373,6 +374,7 @@ async function complete(
   }
 
   await postCallback("complete", {
+    auditId: input.auditId,
     runId: input.runId,
     success: result.success,
     status: result.status,

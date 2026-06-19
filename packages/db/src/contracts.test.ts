@@ -3,21 +3,30 @@ import assert from "node:assert/strict";
 import {
   appendEvent,
   blockWorkerAuditRun,
+  completeWorkerRunAsync,
   completeWorkerRun,
   createAudit,
+  createAuditAsync,
   createShare,
+  createShareAsync,
   generateAuditReportWithAi,
   getArtifactStorageStatus,
   getAuditArtifacts,
+  getAuditEventsAsync,
   getAuditEvents,
+  getAuditOverviewAsync,
   getAuditOverview,
   getDatabaseStatus,
+  getSharedReportAsync,
   getSharedReport,
   preflightTargetUrl,
+  recordWorkerStepAsync,
   recordWorkerStep,
   resetMemoryStoreForTests,
+  runPreflightAsync,
   runPreflight,
   startAuditRun,
+  startWorkerAuditRunAsync,
   startWorkerAuditRun
 } from "./index";
 
@@ -274,6 +283,60 @@ test("worker dispatch plans create running jobs without completing deterministic
   assert.equal(blocked.status, "COMPLETED");
   assert.equal(blocked.runs.every((run) => run.status === "BLOCKED"), true);
   assert.equal(blocked.issues.some((issue) => issue.title === "Browser worker could not start"), true);
+});
+
+test("async persistence boundary preserves audit, callback, report, and share contracts", async () => {
+  resetMemoryStoreForTests();
+  const created = await createAuditAsync({
+    targetUrl: "/demo-target",
+    goal: "Sign up, create a project, invite a teammate.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  await runPreflightAsync(created.audit.id);
+  const plan = await startWorkerAuditRunAsync(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const step = await recordWorkerStepAsync({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open product.",
+    result: "Product loaded in a live worker path.",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: `${baseUrl}/demo-target`
+  });
+
+  const completed = await completeWorkerRunAsync({
+    auditId: created.audit.id,
+    runId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Async worker callback completed.",
+    artifacts: [{ type: "NETWORK_LOG", url: "memory://network", meta: { requests: 2 } }]
+  });
+
+  assert.equal(completed.status, "COMPLETED");
+  assert.equal(completed.runs[0]?.status, "SUCCEEDED");
+  assert.equal((completed.artifacts?.length ?? 0) >= 2, true);
+
+  const events = await getAuditEventsAsync(created.audit.id);
+  assert.equal(events.steps.some((item) => item.id === step.id), true);
+  assert.equal(events.events.some((event) => event.name === "run_completed"), true);
+
+  const overview = await getAuditOverviewAsync(created.audit.id);
+  assert.match(overview.generatedTest, /page\.goto/);
+
+  const share = await createShareAsync(created.audit.id, baseUrl);
+  const shared = await getSharedReportAsync(share.shareToken);
+  assert.equal(shared?.id, created.audit.id);
 });
 
 test("share, database status, and artifact status expose persistence-ready contracts", () => {

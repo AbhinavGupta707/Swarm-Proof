@@ -1,15 +1,15 @@
-import { getAuditOverview, getSharedReport } from "@swarmproof/db";
+import { getAuditOverviewAsync, getSharedReportAsync } from "@swarmproof/db";
 import type { AuditSummary } from "@swarmproof/types";
 import { demoAudit } from "./demo-data";
 
-export function getAuditForPage(auditId: string): AuditSummary {
+export async function getAuditForPage(auditId: string): Promise<AuditSummary> {
   try {
-    return getAuditOverview(auditId);
+    return await getAuditOverviewAsync(auditId);
   } catch {
     return demoAudit;
   }
 }
 
-export function getSharedAuditForPage(shareToken: string): AuditSummary {
-  return getSharedReport(shareToken) ?? demoAudit;
+export async function getSharedAuditForPage(shareToken: string): Promise<AuditSummary> {
+  return await getSharedReportAsync(shareToken) ?? demoAudit;
 }

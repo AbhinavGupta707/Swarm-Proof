@@ -18,6 +18,7 @@ function stepsFor(input: WorkerRunAgentRequest): WorkerStepCallback[] {
   if (input.runMode === "external-public") {
     return [
       step(
+        input.auditId,
         input.runId,
         1,
         "worker_fallback",
@@ -30,24 +31,24 @@ function stepsFor(input: WorkerRunAgentRequest): WorkerStepCallback[] {
 
   if (mode === "mobile") {
     return [
-      step(input.runId, 1, "goto", "Open the target on a mobile viewport.", "Demo target loaded.", base),
-      step(input.runId, 2, "click_text", "Start signup.", "Signup panel opened.", `${base}/signup`),
-      step(input.runId, 3, "inspect_viewport", "Find primary action.", "Create account CTA is below the visible mobile fold.", `${base}/signup`)
+      step(input.auditId, input.runId, 1, "goto", "Open the target on a mobile viewport.", "Demo target loaded.", base),
+      step(input.auditId, input.runId, 2, "click_text", "Start signup.", "Signup panel opened.", `${base}/signup`),
+      step(input.auditId, input.runId, 3, "inspect_viewport", "Find primary action.", "Create account CTA is below the visible mobile fold.", `${base}/signup`)
     ];
   }
 
   if (mode === "chaos") {
     return [
-      step(input.runId, 1, "goto", "Open signup quickly.", "Signup accepted demo credentials.", `${base}/signup`),
-      step(input.runId, 2, "double_click_text", "Double-click create project.", "Two duplicate projects appeared.", `${base}/projects/new`),
-      step(input.runId, 3, "fill_label", "Try invalid teammate email.", "Invite form produced a vague error.", `${base}/invite`)
+      step(input.auditId, input.runId, 1, "goto", "Open signup quickly.", "Signup accepted demo credentials.", `${base}/signup`),
+      step(input.auditId, input.runId, 2, "double_click_text", "Double-click create project.", "Two duplicate projects appeared.", `${base}/projects/new`),
+      step(input.auditId, input.runId, 3, "fill_label", "Try invalid teammate email.", "Invite form produced a vague error.", `${base}/invite`)
     ];
   }
 
   return [
-    step(input.runId, 1, "goto", "Open the product.", "Demo landing page loaded.", base),
-    step(input.runId, 2, "click_text", "Create a project.", "Project creation path opened.", `${base}/projects/new`),
-    step(input.runId, 3, "find_invite", "Find invite teammate action.", "Invite action is labeled Add people and is easy to miss.", `${base}/invite`)
+    step(input.auditId, input.runId, 1, "goto", "Open the product.", "Demo landing page loaded.", base),
+    step(input.auditId, input.runId, 2, "click_text", "Create a project.", "Project creation path opened.", `${base}/projects/new`),
+    step(input.auditId, input.runId, 3, "find_invite", "Find invite teammate action.", "Invite action is labeled Add people and is easy to miss.", `${base}/invite`)
   ];
 }
 
@@ -57,6 +58,7 @@ function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]):
 
   if (input.runMode === "external-public") {
     return {
+      auditId: input.auditId,
       runId: input.runId,
       success: false,
       status: "BLOCKED",
@@ -74,6 +76,7 @@ function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]):
 
   if (mode === "mobile") {
     return {
+      auditId: input.auditId,
       runId: input.runId,
       success: false,
       status: "FAILED",
@@ -91,6 +94,7 @@ function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]):
 
   if (mode === "chaos") {
     return {
+      auditId: input.auditId,
       runId: input.runId,
       success: false,
       status: "FAILED",
@@ -107,6 +111,7 @@ function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]):
   }
 
   return {
+    auditId: input.auditId,
     runId: input.runId,
     success: false,
     status: "BLOCKED",
@@ -122,8 +127,8 @@ function completeFor(input: WorkerRunAgentRequest, steps: WorkerStepCallback[]):
   };
 }
 
-function step(runId: string, stepIndex: number, action: string, thought: string, result: string, url: string): WorkerStepCallback {
-  return { runId, stepIndex, action, thought, result, url, screenshotUrl: frameUrl(action, result) };
+function step(auditId: string, runId: string, stepIndex: number, action: string, thought: string, result: string, url: string): WorkerStepCallback {
+  return { auditId, runId, stepIndex, action, thought, result, url, screenshotUrl: frameUrl(action, result) };
 }
 
 function frameUrl(action: string, result: string) {

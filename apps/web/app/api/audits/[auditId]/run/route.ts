@@ -1,4 +1,4 @@
-import { blockWorkerAuditRun, getAuditOverview, startAuditRun, startWorkerAuditRun } from "@swarmproof/db";
+import { blockWorkerAuditRunAsync, getAuditOverviewAsync, startAuditRunAsync, startWorkerAuditRunAsync } from "@swarmproof/db";
 import type { WorkerHealthSummary, WorkerRunAgentRequest } from "@swarmproof/types";
 import { getBaseUrl, handleApiError, ok } from "../../../_lib";
 import type { NextRequest } from "next/server";
@@ -12,7 +12,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     if (!workerBaseUrl) {
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds: await startAuditRunAsync(auditId),
         dispatched: false,
         provider: "deterministic-demo",
         fallbackReason: "BROWSER_WORKER_URL is not configured."
@@ -22,7 +22,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const health = await getWorkerHealth(workerBaseUrl);
     if (!health.ok) {
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds: await startAuditRunAsync(auditId),
         dispatched: false,
         provider: "deterministic-demo",
         fallbackReason: health.error
@@ -31,19 +31,19 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     if (health.data.provider !== "local-playwright") {
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds: await startAuditRunAsync(auditId),
         dispatched: false,
         provider: health.data.provider,
         fallbackReason: "Worker is healthy but not running the local-playwright provider."
       });
     }
 
-    const plan = startWorkerAuditRun(auditId, getBaseUrl(request));
+    const plan = await startWorkerAuditRunAsync(auditId, getBaseUrl(request));
     try {
       await Promise.all(plan.requests.map((payload) => dispatchRun(workerBaseUrl, payload)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Worker dispatch failed.";
-      blockWorkerAuditRun(auditId, message);
+      await blockWorkerAuditRunAsync(auditId, message);
       return ok({
         runIds: plan.runIds,
         dispatched: false,
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       runIds: plan.runIds,
       dispatched: plan.requests.length > 0,
       provider: health.data.provider,
-      audit: getAuditOverview(auditId)
+      audit: await getAuditOverviewAsync(auditId)
     });
   } catch (error) {
     return handleApiError(error);

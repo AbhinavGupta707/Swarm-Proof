@@ -1,4 +1,4 @@
-import { getAuditEvents } from "@swarmproof/db";
+import { getAuditEventsAsync } from "@swarmproof/db";
 import { getAuditForPage } from "@/lib/audit-data";
 import { RunningDashboard } from "./running-dashboard";
 
@@ -6,11 +6,11 @@ export const dynamic = "force-dynamic";
 
 export default async function RunningAuditPage({ params }: { params: Promise<{ auditId: string }> }) {
   const { auditId } = await params;
-  const audit = getAuditForPage(auditId);
+  const audit = await getAuditForPage(auditId);
   let initialEventCount = audit.eventCount ?? 0;
 
   try {
-    initialEventCount = audit.id === auditId ? getAuditEvents(auditId).events.length : initialEventCount;
+    initialEventCount = audit.id === auditId ? (await getAuditEventsAsync(auditId)).events.length : initialEventCount;
   } catch {
     initialEventCount = audit.eventCount ?? 0;
   }

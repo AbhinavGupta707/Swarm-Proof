@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ReplayPage({ params }: { params: Promise<{ auditId: string; runId: string }> }) {
   const { auditId, runId } = await params;
-  const audit = getAuditForPage(auditId);
+  const audit = await getAuditForPage(auditId);
   const run = audit.runs.find((item) => item.id === runId) ?? audit.runs[0];
   const frames = run ? evidenceFramesForRun(audit, run.id) : [];
   const steps = run ? auditTimeline(audit).filter((step) => step.runId === run.id) : [];

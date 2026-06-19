@@ -33,12 +33,14 @@ Node service for browser execution. Owns:
 - `packages/types`: shared contracts used by web and worker.
 - `packages/events`: event names and safe event wrapper.
 - `packages/ai`: Fireworks provider wrapper and prompts.
-- `packages/db`: Prisma schema plus DB client boundary.
+- `packages/db`: DB client boundary, Postgres audit snapshot adapter, memory fallback, and Prisma-ready normalized schema.
 - `packages/testgen`: generated Playwright test helpers.
 
 ## Current Runtime State
 
-The app keeps deterministic demo data and memory fallback so the judged `/demo-target` path remains reliable without external services. The browser worker now has a `local-playwright` provider that can drive `/demo-target` and perform conservative public URL observation when `BROWSER_WORKER_URL` and `BROWSER_PROVIDER=local-playwright` are configured. DB-backed persistence and durable object storage remain behind the repository/artifact boundary until their runtime adapters are enabled.
+The app keeps deterministic demo data and memory fallback so the judged `/demo-target` path remains reliable without external services. The browser worker now has a `local-playwright` provider that can drive `/demo-target` and perform conservative public URL observation when `BROWSER_WORKER_URL` and `BROWSER_PROVIDER=local-playwright` are configured.
+
+When `DATABASE_URL` is configured, audit state is backed by Postgres table `swarmproof_audit_snapshots`. The adapter stores each audit as a JSONB snapshot, including runs, steps, events, issues, artifacts, reports, jobs, and share tokens. Mutating routes and worker callbacks use async DB functions and per-audit advisory locks. Durable object storage is still a future improvement; screenshots currently remain report-safe artifact references/data URLs.
 
 ## Integration Rule
 

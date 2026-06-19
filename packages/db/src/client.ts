@@ -1,4 +1,4 @@
-export type PersistenceMode = "memory" | "prisma-ready";
+export type PersistenceMode = "memory" | "postgres";
 
 export type PersistenceConfig = {
   mode: PersistenceMode;
@@ -9,7 +9,7 @@ export type PersistenceConfig = {
 
 export function getPersistenceConfig(): PersistenceConfig {
   return {
-    mode: process.env.DATABASE_URL ? "prisma-ready" : "memory",
+    mode: process.env.DATABASE_URL && process.env.SWARMPROOF_PERSISTENCE !== "memory" ? "postgres" : "memory",
     databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
     artifactStorageProvider: process.env.ARTIFACT_STORAGE_PROVIDER ?? "memory",
     artifactBucket: process.env.SUPABASE_STORAGE_BUCKET ?? process.env.R2_BUCKET ?? null
@@ -18,6 +18,6 @@ export function getPersistenceConfig(): PersistenceConfig {
 
 export function assertDatabaseConfigured() {
   if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is required for Prisma-backed persistence. The memory fallback is active without it.");
+    throw new Error("DATABASE_URL is required for Postgres-backed persistence. The memory fallback is active without it.");
   }
 }

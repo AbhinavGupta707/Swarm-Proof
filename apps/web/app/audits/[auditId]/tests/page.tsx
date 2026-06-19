@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function TestsPage({ params }: { params: Promise<{ auditId: string }> }) {
   const { auditId } = await params;
-  const audit = getAuditForPage(auditId);
+  const audit = await getAuditForPage(auditId);
 
   return (
     <main className="section">
