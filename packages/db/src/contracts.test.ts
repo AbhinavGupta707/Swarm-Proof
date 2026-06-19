@@ -6,6 +6,7 @@ import {
   completeWorkerRun,
   createAudit,
   createShare,
+  generateAuditReportWithAi,
   getArtifactStorageStatus,
   getAuditArtifacts,
   getAuditEvents,
@@ -82,6 +83,95 @@ test("generated Playwright output includes navigation, action, and assertion", (
   assert.match(generated, /page\.goto/);
   assert.match(generated, /getBy(Role|Label)/);
   assert.match(generated, /expect/);
+  assert.match(generated, /Observed SwarmProof evidence/);
+});
+
+test("evidence report synthesis links worker steps, artifacts, bug export, and generated tests", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "/demo-target",
+    goal: "Sign up, create a project, invite a teammate.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const step = recordWorkerStep({
+    runId,
+    stepIndex: 1,
+    action: "find_invite",
+    status: "warning",
+    thought: "Looked for invite teammate CTA.",
+    result: "No Invite teammate action is visible; Add people is ambiguous.",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: `${baseUrl}/demo-target/invite`
+  });
+
+  completeWorkerRun({
+    runId,
+    success: false,
+    status: "BLOCKED",
+    summary: "Blocked by ambiguous invite copy.",
+    issues: [{
+      severity: "MEDIUM",
+      category: "Information architecture",
+      title: "Invite teammate CTA is hard to recognize",
+      description: "A real run found Add people instead of Invite teammate.",
+      evidenceStepIds: [step.id],
+      suggestedFix: "Rename Add people to Invite teammate."
+    }]
+  });
+
+  const overview = getAuditOverview(created.audit.id);
+  assert.match(overview.report?.summary ?? "", /evidence-backed trace/);
+  assert.match(overview.report?.markdown ?? "", /## Persona results/);
+  assert.match(overview.report?.markdown ?? "", /## Reproduction evidence/);
+  assert.match(overview.report?.markdown ?? "", /## Bug export/);
+  assert.match(overview.report?.markdown ?? "", /Invite teammate CTA is hard to recognize/);
+  assert.match(overview.report?.markdown ?? "", /normal step 1, warning/);
+  assert.match(overview.report?.markdown ?? "", new RegExp(step.artifactId ?? "artifact_"));
+  assert.equal(overview.report?.markdown.includes("ZmFrZS1wbmc="), false);
+  assert.match(overview.generatedTest, /Observed SwarmProof evidence/);
+  assert.match(overview.generatedTest, /page\.goto/);
+  assert.match(overview.generatedTest, /getByRole/);
+  assert.match(overview.generatedTest, /expect/);
+});
+
+test("AI report synthesis falls back deterministically when no provider key is configured", async () => {
+  resetMemoryStoreForTests();
+  const hadProviderKey = Object.prototype.hasOwnProperty.call(process.env, "FIREWORKS_API_KEY");
+  const previousKey = process.env.FIREWORKS_API_KEY;
+  delete process.env.FIREWORKS_API_KEY;
+  try {
+    const created = createAudit({
+      targetUrl: "/demo-target",
+      goal: "Sign up, create a project, invite a teammate.",
+      modes: ["normal"],
+      baseUrl
+    });
+
+    assert.equal(created.ok, true);
+    if (!created.ok) throw new Error("Audit creation failed");
+
+    startAuditRun(created.audit.id);
+    const report = await generateAuditReportWithAi(created.audit.id);
+    assert.match(report.summary, /evidence-backed trace/);
+    assert.match(report.markdown, /## Bug export/);
+    assert.match(report.reportJson.playwrightTests[0]?.code ?? "", /Observed SwarmProof evidence/);
+  } finally {
+    if (hadProviderKey) {
+      process.env.FIREWORKS_API_KEY = previousKey;
+    } else {
+      delete process.env.FIREWORKS_API_KEY;
+    }
+  }
 });
 
 test("event sanitization drops unsafe keys and keeps safe scalar props", () => {

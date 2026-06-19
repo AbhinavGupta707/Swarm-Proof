@@ -7,6 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@swarmproof/ai": "workspace:^",
+    "@swarmproof/testgen": "workspace:^",
     "@swarmproof/types": "workspace:*"
   },
   "scripts": {

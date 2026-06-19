@@ -1,4 +1,6 @@
 import { defaultPersonas, type PersonaConfig, type PersonaMode } from "@swarmproof/types";
+import { createAiProvider, reportSystemPrompt } from "@swarmproof/ai";
+import { buildEvidencePlaywrightTest } from "@swarmproof/testgen";
 import type {
   ArtifactKind,
   ArtifactSummary,
@@ -20,6 +22,27 @@ export { assertDatabaseConfigured, getPersistenceConfig } from "./client";
 type SafeProps = Record<string, string | number | boolean | null>;
 
 type PreflightResult = AuditPreflightSummary;
+type AuditOutcomeValue = AuditReportSummary["outcome"];
+type StepEvidence = { run: AuditRunSummary; step: BrowserStepSummary };
+type EvidenceStats = {
+  runCount: number;
+  completedRunCount: number;
+  succeededRunCount: number;
+  failedRunCount: number;
+  blockedRunCount: number;
+  stepCount: number;
+  issueCount: number;
+  artifactCount: number;
+  screenshotCount: number;
+  warningStepCount: number;
+  failedStepCount: number;
+  topIssue?: AuditIssueSummary;
+};
+type AiReportDraft = {
+  summary?: string;
+  markdown?: string;
+  generatedTest?: string;
+};
 
 type AuditRecord = Omit<AuditSummary, "score" | "runs" | "issues" | "generatedTest" | "report" | "artifacts" | "jobs" | "preflight"> & {
   modes: PersonaMode[];
@@ -345,7 +368,7 @@ export function getAuditEvents(auditId: string) {
 export function generateAuditReport(auditId: string) {
   const audit = requireAudit(auditId);
   const generatedTest = buildGeneratedTest(audit);
-  const outcome = audit.issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
+  const outcome: AuditOutcomeValue = audit.issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
     ? "fail"
     : audit.issues.length > 0
       ? "partial"
@@ -370,6 +393,41 @@ export function generateAuditReport(auditId: string) {
   audit.report = report;
   audit.updatedAt = now;
   appendEvent("report_generated", audit.id, { score, outcome, issueCount: audit.issues.length });
+  return report;
+}
+
+export async function generateAuditReportWithAi(auditId: string) {
+  const audit = requireAudit(auditId);
+  const fallback = generateAuditReport(auditId);
+
+  if (!process.env.FIREWORKS_API_KEY) {
+    return fallback;
+  }
+
+  const draft = await createAiProvider().generateJson<AiReportDraft>({
+    system: reportSystemPrompt,
+    prompt: buildAiReportPrompt(audit),
+    fallback: {}
+  });
+  const safeDraft = sanitizeAiReportDraft(draft);
+  if (!safeDraft.summary && !safeDraft.markdown && !safeDraft.generatedTest) {
+    appendEvent("ai_report_synthesis_skipped", audit.id, { reason: "fallback" });
+    return fallback;
+  }
+
+  const generatedTest = safeDraft.generatedTest ?? fallback.reportJson.playwrightTests[0]?.code ?? buildGeneratedTest(audit);
+  const report: AuditReportSummary = {
+    ...fallback,
+    summary: safeDraft.summary ?? fallback.summary,
+    markdown: safeDraft.markdown ?? fallback.markdown,
+    reportJson: {
+      ...fallback.reportJson,
+      playwrightTests: [{ name: "swarmproof generated smoke test", code: generatedTest }]
+    }
+  };
+  audit.report = report;
+  touch(audit);
+  appendEvent("ai_report_synthesis_completed", audit.id, { used: true });
   return report;
 }
 
@@ -674,32 +732,56 @@ function addIssue(audit: AuditRecord, issue: Omit<AuditIssueSummary, "id">) {
 }
 
 function buildReportSummary(audit: AuditRecord) {
+  const stats = collectEvidenceStats(audit);
+
+  if (stats.stepCount === 0) {
+    return "SwarmProof has not collected browser evidence yet. Start an audit run to generate a report.";
+  }
+
   if (!audit.preflight.isDemoTarget) {
     if (audit.issues.some((issue) => issue.category === "Execution setup")) {
-      return "The target passed safety checks, but browser execution did not complete in this environment.";
+      return `The target passed safety checks, but browser execution did not complete beyond ${pluralize(stats.stepCount, "evidence step")}.`;
     }
 
     if (audit.provider === "local-playwright") {
-      return "The local Playwright worker loaded the public target, collected evidence, and produced a safety-limited external URL report.";
+      return `The local Playwright worker collected an evidence-backed trace with ${pluralize(stats.stepCount, "step")} across ${pluralize(stats.runCount, "persona")} and ${findingClause(stats)}.`;
     }
 
-    return "The target passed safety checks, but external browser execution is not configured in this demo build.";
+    return `The target passed safety checks and produced ${pluralize(stats.stepCount, "fallback evidence step")}, but external browser execution is not configured in this demo build.`;
   }
 
-  return "The demo flow is partially usable, but the swarm found mobile CTA visibility, ambiguous invite copy, and duplicate-submit friction.";
+  return `SwarmProof collected an evidence-backed trace with ${pluralize(stats.stepCount, "step")} across ${pluralize(stats.runCount, "persona")} and ${findingClause(stats)}.`;
 }
 
-function buildMarkdownReport(audit: AuditRecord, score: number, outcome: string, generatedTest: string) {
-  const issueLines = audit.issues.map((issue) => `- ${issue.severity}: ${issue.title} - ${issue.suggestedFix ?? "Review the affected flow."}`).join("\n");
+function buildMarkdownReport(audit: AuditRecord, score: number, outcome: AuditOutcomeValue, generatedTest: string) {
+  const stats = collectEvidenceStats(audit);
+  const personaSections = audit.runs.map((run) => formatRunEvidence(audit, run)).join("\n\n");
+  const issueSections = audit.issues.map((issue, index) => formatIssueEvidence(audit, issue, index + 1)).join("\n\n");
+  const artifactLines = audit.artifacts.map((artifact) => formatArtifactReference(audit, artifact)).join("\n");
+  const bugExport = audit.issues.map((issue, index) => formatBugExport(audit, issue, index + 1)).join("\n\n");
+
   return `# SwarmProof audit report
 
 Outcome: ${outcome}
 Score: ${score}
+Target: ${displayTarget(audit)}
+Goal: ${audit.goal}
+Provider: ${audit.provider}
+Evidence: ${pluralize(stats.stepCount, "browser step")} across ${pluralize(stats.runCount, "persona")}; ${pluralize(stats.screenshotCount, "screenshot frame")}; ${pluralize(stats.artifactCount, "artifact")}.
 
 ${buildReportSummary(audit)}
 
-## Issues
-${issueLines || "- No issues detected in this run."}
+## Persona results
+${personaSections || "- No persona runs have been recorded yet."}
+
+## Reproduction evidence
+${issueSections || "- No issues detected in this run."}
+
+## Bug export
+${bugExport || "- No bug export generated because no issues were detected."}
+
+## Artifact references
+${artifactLines || "- No artifact references were captured."}
 
 ## Generated Playwright starter
 
@@ -711,18 +793,236 @@ ${generatedTest}
 
 function buildGeneratedTest(audit: AuditRecord) {
   const target = audit.preflight.isDemoTarget ? "/demo-target" : audit.normalizedUrl ?? audit.targetUrl;
-  return `import { test, expect } from '@playwright/test';
+  const issueProvidedTest = audit.issues.find((issue) => isUsableGeneratedTest(issue.generatedTest))?.generatedTest;
+  if (issueProvidedTest) {
+    return issueProvidedTest;
+  }
 
-test('swarmproof generated smoke test', async ({ page }) => {
-  await page.goto('${escapeForSingleQuotedString(target)}');
-  await page.getByRole('link', { name: /get started|sign up/i }).click();
-  await page.getByLabel(/email/i).fill('demo@example.com');
-  await page.getByLabel(/password/i).fill('TestPassword123!');
-  await page.getByRole('button', { name: /create account|sign up/i }).click();
-  // TODO: selector was inferred from the SwarmProof trace; verify before committing.
-  await expect(page.getByText(/project|people|invite/i)).toBeVisible();
-});
-`;
+  return buildEvidencePlaywrightTest({
+    name: "swarmproof generated smoke test",
+    targetUrl: target,
+    goal: audit.goal,
+    steps: collectStepEvidence(audit).map(({ step }) => ({
+      stepIndex: step.stepIndex,
+      action: step.action,
+      result: step.result,
+      thought: step.thought,
+      url: step.url
+    })),
+    issues: audit.issues.map((issue) => ({
+      title: issue.title,
+      category: issue.category,
+      severity: issue.severity
+    }))
+  });
+}
+
+function collectStepEvidence(audit: AuditRecord): StepEvidence[] {
+  return audit.runs.flatMap((run) => (run.steps ?? []).map((step) => ({ run, step })));
+}
+
+function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
+  const stepEvidence = collectStepEvidence(audit);
+  return {
+    runCount: audit.runs.length,
+    completedRunCount: audit.runs.filter((run) => FINAL_RUN_STATUSES.includes(run.status)).length,
+    succeededRunCount: audit.runs.filter((run) => run.status === "SUCCEEDED").length,
+    failedRunCount: audit.runs.filter((run) => run.status === "FAILED").length,
+    blockedRunCount: audit.runs.filter((run) => run.status === "BLOCKED").length,
+    stepCount: stepEvidence.length,
+    issueCount: audit.issues.length,
+    artifactCount: audit.artifacts.length,
+    screenshotCount: stepEvidence.filter(({ step }) => Boolean(step.artifactId || step.screenshotUrl)).length,
+    warningStepCount: stepEvidence.filter(({ step }) => step.status === "warning").length,
+    failedStepCount: stepEvidence.filter(({ step }) => step.status === "failed").length,
+    topIssue: [...audit.issues].sort((left, right) => severityRank(right.severity) - severityRank(left.severity))[0]
+  };
+}
+
+function findingClause(stats: EvidenceStats) {
+  if (!stats.issueCount) {
+    return `did not find a blocking issue; ${stats.succeededRunCount} of ${stats.runCount || 0} personas completed cleanly`;
+  }
+
+  const topIssue = stats.topIssue ? `, led by "${stats.topIssue.title}"` : "";
+  return `found ${pluralize(stats.issueCount, "issue")}${topIssue}`;
+}
+
+function formatRunEvidence(audit: AuditRecord, run: AuditRunSummary) {
+  const steps = (run.steps ?? []).slice(0, 8).map((step) => formatStepEvidence(audit, { run, step })).join("\n");
+  return `### ${run.persona}
+- Mode: ${run.mode}
+- Viewport: ${run.viewport ?? "default"}
+- Result: ${run.status} - ${safeLine(run.summary || "No run summary recorded.")}
+- Evidence:
+${steps || "  - No steps recorded."}`;
+}
+
+function formatIssueEvidence(audit: AuditRecord, issue: AuditIssueSummary, index: number) {
+  const evidence = evidenceForIssue(audit, issue);
+  return `### ${index}. ${issue.title}
+- Severity: ${issue.severity}
+- Category: ${issue.category}
+- Description: ${safeLine(issue.description)}
+- Suggested fix: ${safeLine(issue.suggestedFix ?? "Review the affected flow and tighten the user path.")}
+- Evidence:
+${evidence.map((item) => formatStepEvidence(audit, item)).join("\n") || "  - No linked evidence steps were captured."}`;
+}
+
+function formatBugExport(audit: AuditRecord, issue: AuditIssueSummary, index: number) {
+  const evidence = evidenceForIssue(audit, issue).slice(0, 5);
+  const reproSteps = evidence.map(({ step }, stepIndex) => `${stepIndex + 1}. ${humanizeAction(step.action)}: ${safeLine(step.result, 220)}`).join("\n");
+  const evidenceRefs = evidence.map(({ step }) => step.artifactId ?? step.id).join(", ");
+
+  return `### Bug ${index}: ${issue.title}
+- Severity: ${issue.severity}
+- Area: ${issue.category}
+- Target: ${displayTarget(audit)}
+- Goal: ${audit.goal}
+- Actual: ${safeLine(issue.description)}
+- Expected: User can complete "${safeLine(audit.goal, 180)}" without this blocker.
+- Repro steps:
+${reproSteps || "1. Re-run the SwarmProof persona and inspect the linked issue."}
+- Evidence refs: ${evidenceRefs || "No explicit step references"}
+- Suggested fix: ${safeLine(issue.suggestedFix ?? "Review the affected flow.")}`;
+}
+
+function formatArtifactReference(audit: AuditRecord, artifact: ArtifactSummary) {
+  const run = artifact.runId ? audit.runs.find((candidate) => candidate.id === artifact.runId) : undefined;
+  const stepIndex = typeof artifact.meta?.stepIndex === "number" ? `, step ${artifact.meta.stepIndex}` : "";
+  const content = artifact.contentType ? `, ${artifact.contentType}` : "";
+  return `- ${artifact.kind}: ${artifact.id}${run ? `, ${run.mode}` : ""}${stepIndex}${content}`;
+}
+
+function evidenceForIssue(audit: AuditRecord, issue: AuditIssueSummary) {
+  const linkedIds = new Set(issue.evidenceStepIds ?? []);
+  const allEvidence = collectStepEvidence(audit);
+  const linkedEvidence = allEvidence.filter(({ step }) => linkedIds.has(step.id));
+  if (linkedEvidence.length > 0) {
+    return linkedEvidence;
+  }
+
+  const issueText = `${issue.title} ${issue.description} ${issue.category}`.toLowerCase();
+  const keywordEvidence = allEvidence.filter(({ step }) => {
+    const stepText = `${step.action} ${step.result} ${step.thought ?? ""}`.toLowerCase();
+    return issueText.split(/\W+/).filter((word) => word.length > 4).some((word) => stepText.includes(word));
+  });
+  return keywordEvidence.slice(0, 3);
+}
+
+function formatStepEvidence(audit: AuditRecord, evidence: StepEvidence) {
+  const { run, step } = evidence;
+  const status = step.status ? `, ${step.status}` : "";
+  const artifact = step.artifactId ? `; artifact ${step.artifactId}` : step.screenshotUrl ? "; screenshot captured" : "";
+  const location = displayStepLocation(audit, step.url);
+  const at = location ? ` at ${location}` : "";
+  return `  - ${run.mode} step ${step.stepIndex}${status}: ${humanizeAction(step.action)} -> ${safeLine(step.result)}${at}${artifact}`;
+}
+
+function buildAiReportPrompt(audit: AuditRecord) {
+  const stats = collectEvidenceStats(audit);
+  const digest = {
+    target: displayTarget(audit),
+    goal: audit.goal,
+    provider: audit.provider,
+    stats,
+    runs: audit.runs.map((run) => ({
+      persona: run.persona,
+      mode: run.mode,
+      status: run.status,
+      summary: safeLine(run.summary, 300),
+      steps: (run.steps ?? []).map((step) => ({
+        id: step.id,
+        stepIndex: step.stepIndex,
+        action: step.action,
+        status: step.status ?? "passed",
+        result: safeLine(step.result, 260),
+        thought: step.thought ? safeLine(step.thought, 180) : undefined,
+        location: displayStepLocation(audit, step.url),
+        artifactId: step.artifactId
+      }))
+    })),
+    issues: audit.issues.map((issue) => ({
+      id: issue.id,
+      severity: issue.severity,
+      category: issue.category,
+      title: issue.title,
+      description: safeLine(issue.description, 360),
+      evidenceStepIds: issue.evidenceStepIds ?? [],
+      suggestedFix: issue.suggestedFix
+    })),
+    artifacts: audit.artifacts.map((artifact) => ({
+      id: artifact.id,
+      kind: artifact.kind,
+      runId: artifact.runId,
+      meta: artifact.meta
+    }))
+  };
+  return `Write JSON with optional keys summary, markdown, and generatedTest. Do not invent evidence or include raw screenshots.\n${JSON.stringify(digest, null, 2)}`;
+}
+
+function sanitizeAiReportDraft(draft: AiReportDraft): AiReportDraft {
+  return {
+    summary: sanitizeAiText(draft.summary, 700),
+    markdown: sanitizeAiText(draft.markdown, 14000),
+    generatedTest: isUsableGeneratedTest(draft.generatedTest) ? draft.generatedTest : undefined
+  };
+}
+
+function sanitizeAiText(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  if (/data:image|base64,/i.test(value)) {
+    return undefined;
+  }
+
+  return value.trim().slice(0, maxLength) || undefined;
+}
+
+function isUsableGeneratedTest(value: unknown): value is string {
+  return typeof value === "string" && value.length < 16000 && /page\.goto/.test(value) && /expect/.test(value);
+}
+
+function displayTarget(audit: AuditRecord) {
+  return audit.preflight.isDemoTarget ? "/demo-target" : audit.normalizedUrl ?? audit.targetUrl;
+}
+
+function displayStepLocation(audit: AuditRecord, value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value);
+    const target = audit.normalizedUrl ? new URL(audit.normalizedUrl) : undefined;
+    if (audit.preflight.isDemoTarget || target?.hostname === url.hostname) {
+      return url.pathname;
+    }
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return value.startsWith("/") ? value : undefined;
+  }
+}
+
+function humanizeAction(action: string) {
+  return action.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function safeLine(value: string, maxLength = 280) {
+  return value.replace(/\s+/g, " ").replace(/\|/g, "/").trim().slice(0, maxLength);
+}
+
+function pluralize(count: number, label: string) {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function severityRank(severity: AuditIssueSummary["severity"]) {
+  if (severity === "CRITICAL") return 4;
+  if (severity === "HIGH") return 3;
+  if (severity === "MEDIUM") return 2;
+  return 1;
 }
 
 function calculateScore(audit: AuditRecord) {

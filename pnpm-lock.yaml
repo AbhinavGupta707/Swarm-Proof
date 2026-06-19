@@ -103,6 +103,12 @@ importers:
 
   packages/db:
     dependencies:
+      '@swarmproof/ai':
+        specifier: workspace:^
+        version: link:../ai
+      '@swarmproof/testgen':
+        specifier: workspace:^
+        version: link:../testgen
       '@swarmproof/types':
         specifier: workspace:*
         version: link:../types
