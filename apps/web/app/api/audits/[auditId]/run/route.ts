@@ -40,7 +40,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const plan = await startWorkerAuditRunAsync(auditId, getBaseUrl(request));
     try {
-      await Promise.all(plan.requests.map((payload) => dispatchRun(workerBaseUrl, payload)));
+      for (const payload of plan.requests) {
+        await dispatchRun(workerBaseUrl, payload);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Worker dispatch failed.";
       await blockWorkerAuditRunAsync(auditId, message);

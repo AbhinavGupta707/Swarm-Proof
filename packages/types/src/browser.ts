@@ -20,6 +20,7 @@ export type WorkerRunAgentRequest = {
   goal: string;
   persona: PersonaConfig;
   maxSteps: number;
+  timeoutMs?: number;
   callbackBaseUrl: string;
   runMode?: "demo-target" | "external-public";
   allowExternalFormSubmissions?: boolean;
@@ -54,7 +55,7 @@ export type WorkerCompleteCallback = {
   runId: string;
   success: boolean;
   summary: string;
-  status?: "SUCCEEDED" | "FAILED" | "BLOCKED";
+  status?: "SUCCEEDED" | "FAILED" | "BLOCKED" | "TIMED_OUT";
   issues?: WorkerIssueCallback[];
   artifacts?: Array<{ type: ArtifactKind | string; url: string; meta?: Record<string, string | number | boolean> }>;
 };
@@ -64,4 +65,6 @@ export type WorkerHealthSummary = {
   provider: "deterministic-demo" | "local-playwright";
   playwrightAvailable: boolean;
   personas: string[];
+  queueDepth?: number;
+  activeRuns?: number;
 };

@@ -4,6 +4,8 @@ import { runDeterministicAgent, type CallbackPoster } from "./deterministic-runn
 import { isPlaywrightPackageAvailable, runLocalPlaywrightAgent } from "./local-playwright";
 
 const port = Number(process.env.PORT ?? 8787);
+const queuedRuns: WorkerRunAgentRequest[] = [];
+let activeRunCount = 0;
 
 const server = createServer(async (request, response) => {
   try {
@@ -43,31 +45,63 @@ server.listen(port, () => {
 });
 
 function queueWorkerRun(input: WorkerRunAgentRequest) {
-  setTimeout(() => {
-    runWorker(input).catch((error) => {
-      console.error("worker run failed", error);
-    });
-  }, 0);
+  queuedRuns.push(input);
+  void drainWorkerQueue();
 }
 
-async function runWorker(input: WorkerRunAgentRequest) {
-  const postCallback = callbackPoster(input.callbackBaseUrl);
+async function drainWorkerQueue() {
+  if (activeRunCount > 0) {
+    return;
+  }
 
+  const next = queuedRuns.shift();
+  if (!next) {
+    return;
+  }
+
+  activeRunCount = 1;
+  try {
+    await runQueuedWorker(next);
+  } catch (error) {
+    console.error("worker run failed", error);
+  } finally {
+    activeRunCount = 0;
+    void drainWorkerQueue();
+  }
+}
+
+async function runQueuedWorker(input: WorkerRunAgentRequest) {
+  const postCallback = callbackPoster(input.callbackBaseUrl);
+  try {
+    await withTimeout(runWorker(input, postCallback), workerTimeoutMs(input), new WorkerTimeoutError("Worker persona timeout elapsed."));
+  } catch (error) {
+    await completeAfterWorkerError(input, postCallback, error);
+  }
+}
+
+async function runWorker(input: WorkerRunAgentRequest, postCallback: CallbackPoster) {
   if (activeProvider() === "local-playwright") {
     try {
       await runLocalPlaywrightAgent(input, postCallback);
       return;
     } catch (error) {
-      console.error("local Playwright run failed, falling back to deterministic runner", error);
+      console.error("local Playwright run failed", error);
       await postCallback("step", {
         auditId: input.auditId,
         runId: input.runId,
-        stepIndex: 0,
-        action: "worker_fallback",
-        status: "warning",
+        stepIndex: input.maxSteps + 1,
+        action: "worker_crash",
+        status: "failed",
         thought: "The local Playwright provider failed before completing the run.",
-        result: error instanceof Error ? error.message : "Unknown Playwright provider error."
+        result: safeWorkerError(error)
       });
+
+      if (input.runMode === "demo-target") {
+        await runDeterministicAgent(input, postCallback);
+        return;
+      }
+
+      throw error;
     }
   }
 
@@ -79,7 +113,9 @@ function workerHealth(): WorkerHealthSummary {
     service: "swarmproof-browser-worker",
     provider: activeProvider(),
     playwrightAvailable: isPlaywrightPackageAvailable(),
-    personas: defaultPersonas.map((persona) => persona.mode)
+    personas: defaultPersonas.map((persona) => persona.mode),
+    queueDepth: queuedRuns.length,
+    activeRuns: activeRunCount
   };
 }
 
@@ -91,16 +127,42 @@ function callbackPoster(callbackBaseUrl: string): CallbackPoster {
   const base = callbackBaseUrl.replace(/\/$/, "");
 
   return async <T>(path: "step" | "complete", body: WorkerStepCallback | WorkerCompleteCallback) => {
-    return postCallback<T>(`${base}/api/worker-callback/${path}`, body);
+    return postCallbackWithRetry<T>(`${base}/api/worker-callback/${path}`, body);
   };
 }
 
+async function postCallbackWithRetry<T>(url: string, body: WorkerStepCallback | WorkerCompleteCallback): Promise<T> {
+  const attempts = Math.max(1, Number(process.env.WORKER_CALLBACK_RETRIES ?? 4));
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await postCallback<T>(url, body);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts - 1) {
+        await delay(250 * 2 ** attempt);
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Callback failed after retries.");
+}
+
 async function postCallback<T>(url: string, body: WorkerStepCallback | WorkerCompleteCallback): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1_000, Number(process.env.WORKER_CALLBACK_TIMEOUT_MS ?? 8_000)));
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     throw new Error(`Callback failed: ${response.status} ${response.statusText}`);
@@ -112,6 +174,70 @@ async function postCallback<T>(url: string, body: WorkerStepCallback | WorkerCom
   }
 
   return payload.data as T;
+}
+
+async function completeAfterWorkerError(input: WorkerRunAgentRequest, postCallback: CallbackPoster, error: unknown) {
+  const errorMessage = safeWorkerError(error);
+  const timedOut = error instanceof WorkerTimeoutError || /persona timeout|timeout elapsed/i.test(errorMessage);
+  try {
+    await postCallback("complete", {
+      auditId: input.auditId,
+      runId: input.runId,
+      success: false,
+      status: timedOut ? "TIMED_OUT" : "FAILED",
+      summary: timedOut
+        ? "The browser worker hit its persona timeout. Partial evidence is ready."
+        : "The browser worker crashed before it could finish. Partial evidence is ready.",
+      issues: [{
+        severity: "MEDIUM",
+        category: timedOut ? "Execution timeout" : "Worker crash",
+        title: timedOut ? "Browser worker timed out before finishing" : "Browser worker crashed before finishing",
+        description: timedOut
+          ? "The Railway worker exceeded the persona budget and finalized the run with partial evidence."
+          : `The Railway worker failed during live browser execution: ${errorMessage}`,
+        suggestedFix: timedOut
+          ? "Retry the persona after checking worker health and target page weight."
+          : "Check worker logs, Playwright crash reasons, and callback health before retrying."
+      }]
+    });
+  } catch (callbackError) {
+    console.error("failed to post terminal worker callback", callbackError);
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutError: Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guarded = promise.finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+  guarded.catch(() => undefined);
+  return Promise.race([
+    guarded,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(timeoutError), timeoutMs);
+    })
+  ]);
+}
+
+function workerTimeoutMs(input: WorkerRunAgentRequest) {
+  const fallback = input.runMode === "demo-target" ? 45_000 : 75_000;
+  const requested = Number(input.timeoutMs ?? process.env.WORKER_PERSONA_TIMEOUT_MS ?? fallback);
+  return Number.isFinite(requested) && requested > 0 ? requested : fallback;
+}
+
+function safeWorkerError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Unknown Playwright provider error.";
+  return message
+    .replace(/https?:\/\/[^\s)]+/g, "[redacted-url]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
+}
+
+class WorkerTimeoutError extends Error {}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {

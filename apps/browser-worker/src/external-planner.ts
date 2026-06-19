@@ -231,7 +231,7 @@ function scoreCandidate(
   const matchedGoalTokens = context.goalTokens.filter((token) => lowerLabel.includes(token));
   score += matchedGoalTokens.length * 7;
 
-  if (/\b(get started|start|try|demo|learn|learn more|docs|documentation|pricing|contact|create|invite|sign up|signup|join|shop|buy|compare|customize|choose|select|configure)\b/i.test(label)) {
+  if (/\b(get started|start|try|demo|learn|learn more|docs|documentation|pricing|create|invite|join|shop|buy|compare|customize|choose|select|configure)\b/i.test(label)) {
     score += 8;
   }
 
@@ -281,7 +281,7 @@ function isUnsafeInputType(inputType?: string) {
 }
 
 function isCredentialBoundaryLabel(label: string) {
-  return /\b(log in|login|sign in|password|sso|continue with google|continue with github)\b/i.test(label);
+  return /\b(log in|login|sign in|signin|sign up|signup|create account|start trial|free trial|try for free|start deploying|deploy now|contact sales|talk to sales|book demo|book a demo|request demo|schedule demo|schedule a demo|password|sso|continue with google|continue with github)\b/i.test(label);
 }
 
 function fillValueFor(candidate: ExternalCandidate, goal: string) {
@@ -318,7 +318,7 @@ function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: st
     safetyPolicy: [
       "Choose only a provided candidate ordinal.",
       "Safe exploration includes Buy, Shop, Compare, Customize, Choose, Select, Learn more, and same-origin product/configuration links.",
-      "Do not choose Add to Bag, Checkout, Place Order, Pay, Confirm, Subscribe, Book, Reserve, Delete, Logout, credential, payment, or private-data actions.",
+      "Do not choose Signup, Login, Start Deploying, Add to Cart, Add to Bag, Checkout, Place Order, Pay, Contact Sales, Book Demo, Start Trial, Create Account, credential, payment, or private-data actions.",
       "If only unsafe commitment actions remain, return observe with a truthful safety reason."
     ],
     goal: input.goal,

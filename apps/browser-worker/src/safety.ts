@@ -46,6 +46,18 @@ export function commitmentStopReason(label: string) {
     return "Checkout, payment, order, or confirmation actions are blocked.";
   }
 
+  if (/\b(sign up|signup|create account|start trial|free trial|try for free|start deploying|deploy now)\b/i.test(normalized)) {
+    return "Signup, account creation, trial, or deployment-start actions are blocked.";
+  }
+
+  if (/\b(log in|login|sign in|signin|sso|continue with google|continue with github)\b/i.test(normalized)) {
+    return "Login and credential-provider actions are blocked.";
+  }
+
+  if (/\b(contact sales|talk to sales|book demo|book a demo|request demo|schedule demo|schedule a demo)\b/i.test(normalized)) {
+    return "Sales contact and demo-booking actions are blocked.";
+  }
+
   if (/\b(subscribe|start subscription|book|reserve|delete|remove|destroy|logout|log out|sign out)\b/i.test(normalized)) {
     return "Subscription, booking, destructive, or account-exit actions are blocked.";
   }

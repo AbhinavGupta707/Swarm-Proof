@@ -67,11 +67,10 @@ export async function runLocalPlaywrightAgent(input: WorkerRunAgentRequest, post
       await route.continue();
     });
 
-    if (input.runMode === "demo-target") {
-      await runDemoTargetFlow(input, page, postCallback, state);
-    } else {
-      await runExternalPublicFlow(input, page, postCallback, state);
-    }
+    const flow = input.runMode === "demo-target"
+      ? runDemoTargetFlow(input, page, postCallback, state)
+      : runExternalPublicFlow(input, page, postCallback, state);
+    await withTimeout(flow, localPersonaTimeoutMs(input), new Error("Worker persona timeout elapsed."));
   } finally {
     await context?.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
@@ -767,4 +766,24 @@ function redactUrl(rawUrl: string) {
   } catch {
     return "unknown-url";
   }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutError: Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guarded = promise.finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+  guarded.catch(() => undefined);
+  return Promise.race([
+    guarded,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(timeoutError), timeoutMs);
+    })
+  ]);
+}
+
+function localPersonaTimeoutMs(input: WorkerRunAgentRequest) {
+  const fallback = input.runMode === "demo-target" ? 45_000 : 75_000;
+  const requested = Number(input.timeoutMs ?? process.env.WORKER_PERSONA_TIMEOUT_MS ?? fallback);
+  return Number.isFinite(requested) && requested > 0 ? requested : fallback;
 }
