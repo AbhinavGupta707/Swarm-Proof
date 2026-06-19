@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { Bug, ClipboardCheck, FileCode2, Share2 } from "lucide-react";
+import { Events } from "@swarmproof/events";
+import { TrackPageEvent } from "@/app/track-page-event";
 import { bugReportForAudit } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
@@ -11,6 +13,14 @@ export default async function TestsPage({ params }: { params: Promise<{ auditId:
 
   return (
     <main className="section">
+      <TrackPageEvent
+        name={Events.TestExported}
+        props={{
+          target_kind: audit.preflight?.isDemoTarget ? "demo" : "public",
+          issue_count: audit.issues.length,
+          has_generated_test: Boolean(audit.generatedTest)
+        }}
+      />
       <div className="page-shell">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>

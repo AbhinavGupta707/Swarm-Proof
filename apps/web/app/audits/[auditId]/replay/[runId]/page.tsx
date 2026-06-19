@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { Camera, Monitor, Route, Smartphone } from "lucide-react";
+import { Events } from "@swarmproof/events";
+import { TrackPageEvent } from "@/app/track-page-event";
 import { auditTimeline, evidenceFramesForRun } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
@@ -14,6 +16,15 @@ export default async function ReplayPage({ params }: { params: Promise<{ auditId
 
   return (
     <main className="section surface-grid">
+      <TrackPageEvent
+        name={Events.ReplayOpened}
+        props={{
+          target_kind: audit.preflight?.isDemoTarget ? "demo" : "public",
+          persona: run?.mode ?? "unknown",
+          step_count: steps.length,
+          evidence_frame_count: frames.length
+        }}
+      />
       <div className="page-shell">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>

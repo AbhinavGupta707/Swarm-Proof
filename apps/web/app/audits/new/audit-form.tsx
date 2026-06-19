@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
+import { Events, trackEvent } from "@swarmproof/events";
 
 type CreateAuditResponse = {
   ok: boolean;
@@ -27,8 +28,15 @@ export function AuditForm() {
     const modes = formData.getAll("modes").map(String);
     const targetUrl = forceDemo ? "/demo-target" : String(formData.get("targetUrl") ?? "");
     const goal = forceDemo ? "Sign up, create a project, invite a teammate." : String(formData.get("goal") ?? "");
+    const demoTarget = forceDemo || targetUrl.trim().startsWith("/demo-target");
 
     try {
+      trackEvent(Events.UrlSubmitted, {
+        target_kind: demoTarget ? "demo" : "public",
+        persona_count: modes.length,
+        max_steps: 15
+      });
+
       const createResponse = await fetch("/api/audits", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -39,8 +47,31 @@ export function AuditForm() {
         throw new Error(createJson.error?.message ?? "Could not create audit.");
       }
 
-      await fetch(`/api/audits/${createJson.data.auditId}/preflight`, { method: "POST" });
-      await fetch(`/api/audits/${createJson.data.auditId}/run`, { method: "POST" });
+      trackEvent(Events.AuditCreated, {
+        target_kind: demoTarget ? "demo" : "public",
+        persona_count: modes.length
+      });
+
+      const preflightResponse = await fetch(`/api/audits/${createJson.data.auditId}/preflight`, { method: "POST" });
+      trackEvent(Events.PreflightCompleted, {
+        target_kind: demoTarget ? "demo" : "public",
+        ok: preflightResponse.ok
+      });
+
+      const runResponse = await fetch(`/api/audits/${createJson.data.auditId}/run`, { method: "POST" });
+      let workerDispatched = false;
+      try {
+        const runJson = await runResponse.json() as { data?: { dispatched?: boolean; provider?: string } };
+        workerDispatched = Boolean(runJson.data?.dispatched);
+      } catch {
+        workerDispatched = false;
+      }
+      trackEvent(Events.AgentRunStarted, {
+        target_kind: demoTarget ? "demo" : "public",
+        persona_count: modes.length,
+        worker_dispatched: workerDispatched
+      });
+
       router.push(`/audits/${createJson.data.auditId}/running`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not start audit.");
