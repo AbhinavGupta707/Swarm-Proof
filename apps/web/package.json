@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@swarmproof/ai": "workspace:*",
+    "@swarmproof/db": "workspace:*",
     "@swarmproof/events": "workspace:*",
     "@swarmproof/testgen": "workspace:*",
     "@swarmproof/types": "workspace:*",

@@ -1,6 +1,7 @@
-import Link from "next/link";
-import { Bot, Gauge, Globe2, MonitorSmartphone, RotateCcw, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Suspense } from "react";
+import { Bot, Gauge, MonitorSmartphone, RotateCcw, ShieldCheck } from "lucide-react";
 import { demoAudit } from "@/lib/demo-data";
+import { AuditForm } from "./audit-form";
 
 const modes = [
   { id: "normal", label: "Normal", icon: Bot, detail: "Reasonable first-time user" },
@@ -17,7 +18,7 @@ export default function NewAuditPage() {
           <p className="font-mono text-sm font-semibold text-indigo">New audit</p>
           <h1 className="mt-3 text-4xl font-semibold tracking-normal">Give the swarm a goal.</h1>
           <p className="mt-4 leading-7 text-slate-700">
-            Use the built-in target for the judge-safe path, or stage a public URL audit with the same persona plan.
+            Start with the judge-safe demo target, or submit a public URL for safety preflight and an execution-ready report.
           </p>
           <div className="mt-6 grid gap-3">
             {demoAudit.metrics.map((metric) => (
@@ -30,75 +31,26 @@ export default function NewAuditPage() {
               </div>
             ))}
           </div>
-        </aside>
-        <form className="rounded-ui border border-line bg-panel p-5 shadow-sm">
-          <div className="grid gap-5">
-            <div>
-              <label className="flex items-center gap-2 text-sm font-semibold" htmlFor="targetUrl">
-                <Globe2 className="h-4 w-4 text-indigo" aria-hidden="true" />
-                Product URL
-              </label>
-              <input
-                className="mt-2 min-h-11 w-full rounded-ui border border-line px-3 text-base"
-                id="targetUrl"
-                name="targetUrl"
-                placeholder="https://your-product.com"
-                defaultValue={demoAudit.targetUrl}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-semibold" htmlFor="goal">
-                User goal
-              </label>
-              <textarea
-                className="mt-2 min-h-32 w-full rounded-ui border border-line px-3 py-2 text-base leading-7"
-                id="goal"
-                name="goal"
-                defaultValue={demoAudit.goal}
-              />
-            </div>
-            <fieldset>
-              <legend className="mb-3 flex items-center gap-2 text-sm font-semibold">
-                <SlidersHorizontal className="h-4 w-4 text-indigo" aria-hidden="true" />
-                Personas and checks
-              </legend>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {modes.map((mode) => (
-                  <label key={mode.id} className="flex min-h-16 cursor-pointer items-start gap-3 rounded-ui border border-line px-3 py-3 hover:bg-mist">
-                    <input defaultChecked={mode.id !== "accessibility-lite"} className="mt-1" name="modes" type="checkbox" value={mode.id} />
-                    <mode.icon className="mt-0.5 h-4 w-4 text-indigo" aria-hidden="true" />
-                    <span>
-                      <span className="block font-semibold">{mode.label}</span>
-                      <span className="mt-1 block text-sm text-slate-600">{mode.detail}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <div>
-              <label className="flex items-center justify-between gap-4 text-sm font-semibold" htmlFor="maxSteps">
-                <span className="inline-flex items-center gap-2">
-                  <Gauge className="h-4 w-4 text-indigo" aria-hidden="true" />
-                  Max steps
-                </span>
-                <span className="font-mono text-slate-600">15</span>
-              </label>
-              <input className="mt-3 w-full accent-emerald" defaultValue={15} id="maxSteps" max={25} min={6} name="maxSteps" type="range" />
-            </div>
-            <div className="flex flex-wrap gap-3 border-t border-line pt-5">
-              <Link className="inline-flex min-h-11 items-center gap-2 rounded-ui bg-emerald px-5 py-3 font-semibold text-white hover:bg-emerald/90" href="/audits/demo/running">
-                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                Use built-in demo app
-              </Link>
-              <Link className="inline-flex min-h-11 items-center rounded-ui border border-line px-5 py-3 font-semibold hover:bg-mist" href="/audits/demo/running">
-                Create audit
-              </Link>
-            </div>
-            <p className="text-sm leading-6 text-slate-600">
-              External URLs are treated as public/auth-limited checks in this MVP. The demo app is the reliable end-to-end path.
+          <div className="mt-6 rounded-ui border border-line bg-panel p-4">
+            <p className="flex items-center gap-2 font-semibold">
+              <Gauge className="h-4 w-4 text-indigo" aria-hidden="true" />
+              Persona plan
             </p>
+            <div className="mt-4 grid gap-3">
+              {modes.map((mode) => (
+                <div key={mode.id} className="flex items-start gap-3 text-sm">
+                  <mode.icon className="mt-0.5 h-4 w-4 shrink-0 text-indigo" aria-hidden="true" />
+                  <p>
+                    <span className="font-semibold">{mode.label}:</span> {mode.detail}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
-        </form>
+        </aside>
+        <Suspense fallback={<div className="rounded-ui border border-line bg-panel p-5">Loading audit form...</div>}>
+          <AuditForm />
+        </Suspense>
       </div>
     </main>
   );

@@ -30,6 +30,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@swarmproof/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
+      '@swarmproof/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@swarmproof/events':
         specifier: workspace:*
         version: link:../../packages/events
@@ -85,11 +91,18 @@ importers:
 
   packages/ai:
     devDependencies:
+      '@types/node':
+        specifier: latest
+        version: 25.9.3
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
 
   packages/db:
+    dependencies:
+      '@swarmproof/types':
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       '@types/node':
         specifier: latest

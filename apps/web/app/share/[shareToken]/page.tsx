@@ -1,9 +1,14 @@
 import Link from "next/link";
 import { Eye, FileCode2, LockKeyhole, ShieldCheck } from "lucide-react";
-import { demoAudit } from "@/lib/demo-data";
+import { auditMetrics } from "@/lib/audit-presenters";
+import { getSharedAuditForPage } from "@/lib/audit-data";
+
+export const dynamic = "force-dynamic";
 
 export default async function SharePage({ params }: { params: Promise<{ shareToken: string }> }) {
   const { shareToken } = await params;
+  const audit = getSharedAuditForPage(shareToken);
+  const metrics = auditMetrics(audit);
 
   return (
     <main className="section">
@@ -11,9 +16,9 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Shared report {shareToken}</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-normal">SwarmProof demo audit</h1>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">SwarmProof audit evidence</h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">
-              Public read-only evidence for the built-in demo target. The share view omits secrets, credentials, raw target content, and private URLs.
+              Public read-only evidence for: {audit.goal}. This view omits secrets, credentials, raw target content, and private URLs.
             </p>
           </div>
           <Link className="inline-flex min-h-11 items-center gap-2 rounded-ui border border-line px-4 py-3 font-semibold hover:bg-mist" href="/novus-proof">
@@ -25,9 +30,9 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
         <section className="mt-8 grid gap-4 md:grid-cols-4">
           <div className="rounded-ui border border-line bg-ink p-5 text-white">
             <p className="font-mono text-sm text-slate-300">Score</p>
-            <p className="mt-2 text-5xl font-semibold">{demoAudit.score}</p>
+            <p className="mt-2 text-5xl font-semibold">{audit.score}</p>
           </div>
-          {demoAudit.metrics.slice(0, 3).map((metric) => (
+          {metrics.slice(0, 3).map((metric) => (
             <div key={metric.label} className="rounded-ui border border-line bg-panel p-5">
               <p className="font-mono text-2xl font-semibold">{metric.value}</p>
               <p className="mt-1 font-semibold">{metric.label}</p>
@@ -43,7 +48,7 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
               Public findings
             </h2>
             <div className="mt-4 grid gap-4">
-              {demoAudit.issues.map((issue) => (
+              {audit.issues.map((issue) => (
                 <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
                   <p className="font-mono text-xs font-semibold text-crimson">{issue.severity} · {issue.category}</p>
                   <h3 className="mt-2 text-lg font-semibold">{issue.title}</h3>
@@ -60,7 +65,7 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
                 Generated test preview
               </h2>
               <pre className="mt-4 max-h-80 overflow-x-auto rounded-ui bg-ink p-4 text-sm leading-6 text-white">
-                <code>{demoAudit.generatedTest}</code>
+                <code>{audit.generatedTest}</code>
               </pre>
             </section>
             <section className="rounded-ui border border-line bg-panel p-5">

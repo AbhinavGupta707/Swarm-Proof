@@ -1,3 +1,6 @@
+import type { PersonaConfig } from "./agent";
+import type { IssueSeverity } from "./audit";
+
 export type AgentAction =
   | { type: "click_text"; text: string; reason: string }
   | { type: "fill_label"; label: string; value: string; reason: string }
@@ -15,6 +18,37 @@ export type WorkerRunAgentRequest = {
   runId: string;
   targetUrl: string;
   goal: string;
+  persona: PersonaConfig;
   maxSteps: number;
   callbackBaseUrl: string;
+};
+
+export type WorkerStepCallback = {
+  runId: string;
+  stepIndex: number;
+  action: string;
+  thought?: string;
+  result: string;
+  screenshotBase64?: string;
+  screenshotUrl?: string;
+  url?: string;
+};
+
+export type WorkerIssueCallback = {
+  severity: IssueSeverity;
+  category: string;
+  title: string;
+  description: string;
+  evidenceStepIds?: string[];
+  suggestedFix?: string;
+  generatedTest?: string;
+};
+
+export type WorkerCompleteCallback = {
+  runId: string;
+  success: boolean;
+  summary: string;
+  status?: "SUCCEEDED" | "FAILED" | "BLOCKED";
+  issues?: WorkerIssueCallback[];
+  artifacts?: Array<{ type: string; url: string; meta?: Record<string, string | number | boolean> }>;
 };
