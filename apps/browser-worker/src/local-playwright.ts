@@ -223,7 +223,11 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   });
   history.push(`Loaded ${redactUrl(page.url())}.`);
 
-  const initialAuthWall = await detectAuthWall(page);
+  const initialAuthWall = await withFallbackTimeout(
+    detectAuthWall(page),
+    5_000,
+    { blocked: false, reason: "" }
+  );
   if (initialAuthWall.blocked) {
     issues.push({
       severity: "MEDIUM",
@@ -244,7 +248,30 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
 
   const maxAgentSteps = Math.max(2, Math.min(input.maxSteps - 1, 4));
   for (let offset = 0; offset < maxAgentSteps; offset += 1) {
-    const candidates = await collectInteractiveCandidates(page, new URL(input.targetUrl).origin);
+    const candidates = await withFallbackTimeout(
+      collectInteractiveCandidates(page, new URL(input.targetUrl).origin),
+      6_000,
+      []
+    );
+    if (candidates.length === 0) {
+      await emitStep(input, postCallback, state, {
+        stepIndex: offset + 2,
+        action: "observe",
+        status: "warning",
+        thought: "Inspect visible controls within the public-site time budget.",
+        result: "The worker could not read a stable set of safe visible actions before the per-step budget elapsed.",
+        page
+      });
+      issues.push({
+        severity: "LOW",
+        category: "Exploration limit",
+        title: "Visible action discovery timed out",
+        description: "The public page did not expose a stable set of safe controls quickly enough for this persona budget.",
+        evidenceStepIds: [...state.stepIds],
+        suggestedFix: "Retry with a narrower public URL or goal, and keep the target page responsive for unauthenticated users."
+      });
+      break;
+    }
     const commitmentStops = commitmentStopsForCandidates(candidates);
     const plan = await planExternalActionWithAi({
       goal: input.goal,
@@ -327,7 +354,14 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
 
     const beforeActionUrl = page.url();
-    const result = await executePlannedAction(page, plan);
+    const result = await withFallbackTimeout(
+      executePlannedAction(page, plan),
+      14_000,
+      {
+        ok: false,
+        message: `Action "${plan.candidate.label}" did not settle within the safe per-step budget.`
+      }
+    );
     if (page.url() === beforeActionUrl) {
       usedOrdinals.add(plan.candidate.ordinal);
     } else {
@@ -361,7 +395,11 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       break;
     }
 
-    const authWall = await detectAuthWall(page);
+    const authWall = await withFallbackTimeout(
+      detectAuthWall(page),
+      5_000,
+      { blocked: false, reason: "" }
+    );
     if (authWall.blocked) {
       issues.push({
         severity: "MEDIUM",
@@ -712,11 +750,35 @@ async function executePlannedAction(
   await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
   await page.waitForTimeout(300);
   const afterUrl = page.url();
+  const safeHref = plan.candidate.href;
+  if (safeHref && shouldFollowSafeHrefFallback(beforeUrl, afterUrl, plan.candidate)) {
+    const directResult = await followSafeHref(page, safeHref);
+    if (directResult.ok) {
+      return {
+        ok: true,
+        message: `Clicked "${plan.candidate.label}". The click did not navigate, so the runner followed the safe same-origin href. ${directResult.message}`
+      };
+    }
+  }
+
   const navigation = afterUrl === beforeUrl ? "Page stayed on the same URL." : `Navigated to ${redactUrl(afterUrl)}.`;
   return {
     ok: true,
     message: `Clicked "${plan.candidate.label}". ${navigation} Current page title is ${await safeTitle(page)}.`
   };
+}
+
+async function followSafeHref(page: Page, href: string) {
+  try {
+    await page.goto(href, { waitUntil: "domcontentloaded", timeout: 10_000 });
+    await page.waitForTimeout(300);
+    return {
+      ok: true,
+      message: `Navigated to ${redactUrl(page.url())}. Current page title is ${await safeTitle(page)}.`
+    };
+  } catch {
+    return { ok: false, message: "The safe href fallback did not settle." };
+  }
 }
 
 function addConsoleAndNetworkIssues(issues: WorkerIssueCallback[], state: EvidenceState) {
@@ -765,6 +827,40 @@ function redactUrl(rawUrl: string) {
     return parsed.toString();
   } catch {
     return "unknown-url";
+  }
+}
+
+function normalizeComparableUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+export function shouldFollowSafeHrefFallback(beforeUrl: string, afterUrl: string, candidate: Pick<ExternalCandidate, "href" | "sameOrigin">) {
+  return Boolean(
+    afterUrl === beforeUrl &&
+    candidate.href &&
+    candidate.sameOrigin &&
+    normalizeComparableUrl(candidate.href) !== normalizeComparableUrl(beforeUrl)
+  );
+}
+
+async function withFallbackTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  promise.catch(() => undefined);
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
