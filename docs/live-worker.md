@@ -50,7 +50,8 @@ The local Playwright provider supports:
 - real browser runs on `/demo-target`;
 - real screenshot evidence via callback artifacts;
 - console and network failure counts;
-- conservative public URL observation with same-origin navigation and no risky form submission.
+- conservative public URL exploration with a bounded DOM-driven planner;
+- goal-aware ranking for visible links, buttons, and safe search fields;
+- same-origin navigation only, no credential fields, and no risky form submission unless explicitly owner-confirmed.
 
 External URL mode is intentionally safety-limited. It does not support private authenticated apps, CAPTCHA bypass, payments, destructive actions, or arbitrary PR creation.
-

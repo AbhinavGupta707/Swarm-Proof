@@ -1,7 +1,8 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { WorkerCompleteCallback, WorkerIssueCallback, WorkerRunAgentRequest, WorkerStepCallback } from "@swarmproof/types";
 import type { CallbackPoster } from "./deterministic-runner";
-import { isCrossOriginNavigation, isLikelyAuthWall, isUnsafeWorkerUrl, shouldSkipExternalAction, type WorkerSafetyOptions } from "./safety";
+import { planExternalAction, type ExternalCandidate } from "./external-planner";
+import { isCrossOriginNavigation, isLikelyAuthWall, isUnsafeWorkerUrl, type WorkerSafetyOptions } from "./safety";
 
 type EvidenceState = {
   stepIds: string[];
@@ -205,7 +206,12 @@ async function runDemoTargetFlow(input: WorkerRunAgentRequest, page: Page, postC
 
 async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, postCallback: CallbackPoster, state: EvidenceState) {
   const issues: WorkerIssueCallback[] = [];
+  const visitedHrefs = new Set<string>();
+  const usedOrdinals = new Set<number>();
+  let actionsTaken = 0;
+
   await page.goto(input.targetUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
+  visitedHrefs.add(page.url());
   await emitStep(input, postCallback, state, {
     stepIndex: 1,
     action: "goto",
@@ -233,41 +239,93 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     return;
   }
 
-  const summary = await observeInteractiveSurface(page);
-  await emitStep(input, postCallback, state, {
-    stepIndex: 2,
-    action: "observe",
-    thought: "Summarize visible interactive affordances before taking an action.",
-    result: summary,
-    page
-  });
+  const maxAgentSteps = Math.max(2, Math.min(input.maxSteps - 1, 5));
+  for (let offset = 0; offset < maxAgentSteps; offset += 1) {
+    const candidates = await collectInteractiveCandidates(page, new URL(input.targetUrl).origin);
+    const plan = planExternalAction({
+      goal: input.goal,
+      personaMode: input.persona.mode,
+      candidates,
+      allowFormActions: Boolean(input.allowExternalFormSubmissions),
+      visitedHrefs: [...visitedHrefs],
+      usedOrdinals: [...usedOrdinals]
+    });
 
-  const candidate = await findSafeSameOriginLink(page);
-  if (candidate) {
-    await page.goto(candidate.href, { waitUntil: "domcontentloaded", timeout: 15000 });
+    if (plan.type === "none") {
+      await emitStep(input, postCallback, state, {
+        stepIndex: offset + 2,
+        action: "observe",
+        status: "warning",
+        thought: "Inspect visible controls and stop before risky public-site actions.",
+        result: `${await observeInteractiveSurface(page, candidates)} ${plan.reason}`,
+        page
+      });
+      issues.push({
+        severity: "LOW",
+        category: "Exploration limit",
+        title: "No safe goal-relevant public action was selected",
+        description: "The runner observed the page but did not click or submit risky, cross-origin, purchase, logout, credential, or destructive actions.",
+        evidenceStepIds: [...state.stepIds],
+        suggestedFix: "Provide a public unauthenticated goal with a safe same-origin CTA, or enable a future owner-confirmed form-submission mode."
+      });
+      break;
+    }
+
+    const beforeActionUrl = page.url();
+    const result = await executePlannedAction(page, plan);
+    if (page.url() === beforeActionUrl) {
+      usedOrdinals.add(plan.candidate.ordinal);
+    } else {
+      usedOrdinals.clear();
+    }
+    if (plan.candidate.href) {
+      visitedHrefs.add(plan.candidate.href);
+    }
+    visitedHrefs.add(page.url());
+    actionsTaken += 1;
+
     await emitStep(input, postCallback, state, {
-      stepIndex: 3,
-      action: "click_text",
-      thought: `Follow a safe same-origin link: ${candidate.label}.`,
-      result: `Opened ${await safeTitle(page)}.`,
+      stepIndex: offset + 2,
+      action: plan.type === "fill" ? "fill_label" : `click_${plan.candidate.kind}`,
+      status: result.ok ? "passed" : "failed",
+      thought: plan.reason,
+      result: result.message,
       page
     });
-  } else {
-    issues.push({
-      severity: "LOW",
-      category: "Exploration limit",
-      title: "No safe same-origin exploratory action was selected",
-      description: "The runner observed the page but did not click a risky, cross-origin, purchase, logout, or destructive action.",
-      evidenceStepIds: [...state.stepIds],
-      suggestedFix: "Provide a public goal with a safe same-origin CTA or enable a future owner-confirmed form-submission mode."
-    });
+
+    if (!result.ok) {
+      issues.push({
+        severity: "MEDIUM",
+        category: "Execution",
+        title: "Planned public-site action could not be completed",
+        description: result.message,
+        evidenceStepIds: [...state.stepIds],
+        suggestedFix: "Review whether the target action is visible, enabled, and available without private credentials."
+      });
+      break;
+    }
+
+    const updatedText = await visibleText(page);
+    if (isLikelyAuthWall(updatedText)) {
+      issues.push({
+        severity: "MEDIUM",
+        category: "Auth-limited flow",
+        title: "Audit reached an auth or verification wall",
+        description: "After a safe public action, the page appears to require login, password entry, CAPTCHA, payment, or verification before the goal can continue.",
+        evidenceStepIds: [...state.stepIds],
+        suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future authenticated-testing setup."
+      });
+      break;
+    }
   }
 
   addConsoleAndNetworkIssues(issues, state);
   await complete(input, postCallback, state, {
     success: !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL" || issue.category === "Auth-limited flow"),
     status: issues.some((issue) => issue.category === "Auth-limited flow") ? "BLOCKED" : "SUCCEEDED",
-    summary: "The local Playwright worker loaded and safely explored the public URL.",
+    summary: actionsTaken > 0
+      ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s).`
+      : "The local Playwright worker loaded the public URL but stopped before unsafe or irrelevant actions.",
     issues
   });
 }
@@ -372,38 +430,158 @@ async function visibleText(page: Page) {
   return page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
 }
 
-async function observeInteractiveSurface(page: Page) {
+async function observeInteractiveSurface(page: Page, candidates?: ExternalCandidate[]) {
   const counts = await page.evaluate(() => ({
     links: document.querySelectorAll("a[href]").length,
     buttons: document.querySelectorAll("button").length,
     inputs: document.querySelectorAll("input, textarea, select").length
   }));
+  const visible = candidates ?? await collectInteractiveCandidates(page, new URL(page.url()).origin);
+  const sample = visible.slice(0, 4).map((candidate) => candidate.label).join(", ");
 
-  return `Observed ${counts.links} links, ${counts.buttons} buttons, and ${counts.inputs} form fields on ${new URL(page.url()).hostname}.`;
+  return `Observed ${counts.links} links, ${counts.buttons} buttons, ${counts.inputs} form fields, and ${visible.length} visible candidate action(s) on ${new URL(page.url()).hostname}.${sample ? ` Examples: ${sample}.` : ""}`;
 }
 
-async function findSafeSameOriginLink(page: Page) {
-  const origin = new URL(page.url()).origin;
-  const candidates = await page.locator("a[href]").evaluateAll((elements, allowedOrigin) => {
-    return elements
-      .map((element) => {
-        const anchor = element as HTMLAnchorElement;
-        const href = anchor.href;
-        const label = (anchor.innerText || anchor.getAttribute("aria-label") || anchor.href).trim().replace(/\s+/g, " ");
-        return { href, label };
-      })
-      .filter((candidate) => {
-        try {
-          const parsed = new URL(candidate.href);
-          return parsed.origin === allowedOrigin && candidate.label.length > 0;
-        } catch {
-          return false;
-        }
-      })
-      .slice(0, 10);
-  }, origin);
+async function collectInteractiveCandidates(page: Page, targetOrigin: string): Promise<ExternalCandidate[]> {
+  return page.evaluate((allowedOrigin) => {
+    const selector = [
+      "a[href]",
+      "button",
+      "input",
+      "textarea",
+      "select",
+      "[role='button']",
+      "[role='link']"
+    ].join(",");
+    const elements = Array.from(document.querySelectorAll(selector));
 
-  return candidates.find((candidate) => !shouldSkipExternalAction(candidate.label));
+    return elements
+      .map((element, ordinal): ExternalCandidate | undefined => {
+        if (!isVisible(element)) {
+          return undefined;
+        }
+
+        const tagName = element.tagName.toLowerCase();
+        const role = element.getAttribute("role")?.toLowerCase();
+        const input = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+        const anchor = element as HTMLAnchorElement;
+        const kind = tagName === "a" || role === "link"
+          ? "link"
+          : tagName === "input" || tagName === "textarea" || tagName === "select"
+            ? "input"
+            : "button";
+        const label = labelFor(element);
+        if (!label) {
+          return undefined;
+        }
+
+        const href = kind === "link" ? anchor.href : undefined;
+        let sameOrigin = true;
+        if (href) {
+          try {
+            sameOrigin = new URL(href).origin === allowedOrigin;
+          } catch {
+            sameOrigin = false;
+          }
+        }
+
+        return {
+          kind,
+          label,
+          ordinal,
+          href,
+          sameOrigin,
+          inputType: kind === "input" ? (input.getAttribute("type") ?? tagName).toLowerCase() : undefined,
+          disabled: Boolean((input as HTMLInputElement).disabled || element.getAttribute("aria-disabled") === "true")
+        };
+      })
+      .filter((candidate): candidate is ExternalCandidate => Boolean(candidate))
+      .slice(0, 50);
+
+    function labelFor(element: Element) {
+      const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      const labelledBy = element.getAttribute("aria-labelledby");
+      const labelledByText = labelledBy
+        ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ")
+        : "";
+      const explicitLabel = control.id ? document.querySelector(`label[for="${cssEscape(control.id)}"]`)?.textContent ?? "" : "";
+      return [
+        element.textContent,
+        element.getAttribute("aria-label"),
+        labelledByText,
+        explicitLabel,
+        element.getAttribute("title"),
+        (control as HTMLInputElement | HTMLTextAreaElement).placeholder,
+        control.name,
+        control.value
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 100);
+    }
+
+    function isVisible(element: Element) {
+      const htmlElement = element as HTMLElement;
+      const rect = htmlElement.getBoundingClientRect();
+      const style = window.getComputedStyle(htmlElement);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    }
+
+    function cssEscape(value: string) {
+      return value.replace(/["\\]/g, "\\$&");
+    }
+  }, targetOrigin);
+}
+
+async function executePlannedAction(
+  page: Page,
+  plan: Exclude<ReturnType<typeof planExternalAction>, { type: "none" }>
+) {
+  if (plan.type === "fill") {
+    const filled = await page.evaluate(({ ordinal, value }) => {
+      const selector = "a[href],button,input,textarea,select,[role='button'],[role='link']";
+      const interactiveElements = () => Array.from(document.querySelectorAll(selector));
+      const element = interactiveElements()[ordinal] as HTMLInputElement | HTMLTextAreaElement | undefined;
+      if (!element) return false;
+      element.focus();
+      element.value = value;
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }, { ordinal: plan.candidate.ordinal, value: plan.value });
+
+    return {
+      ok: filled,
+      message: filled
+        ? `Filled "${plan.candidate.label}" with safe test value "${plan.value}".`
+        : `Could not find input "${plan.candidate.label}" to fill.`
+    };
+  }
+
+  const beforeUrl = page.url();
+  const clicked = await page.evaluate((ordinal) => {
+    const selector = "a[href],button,input,textarea,select,[role='button'],[role='link']";
+    const interactiveElements = () => Array.from(document.querySelectorAll(selector));
+    const element = interactiveElements()[ordinal] as HTMLElement | undefined;
+    if (!element) return false;
+    element.click();
+    return true;
+  }, plan.candidate.ordinal);
+
+  if (!clicked) {
+    return { ok: false, message: `Could not find action "${plan.candidate.label}" to click.` };
+  }
+
+  await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
+  await page.waitForTimeout(300);
+  const afterUrl = page.url();
+  const navigation = afterUrl === beforeUrl ? "Page stayed on the same URL." : `Navigated to ${redactUrl(afterUrl)}.`;
+  return {
+    ok: true,
+    message: `Clicked "${plan.candidate.label}". ${navigation} Current page title is ${await safeTitle(page)}.`
+  };
 }
 
 function addConsoleAndNetworkIssues(issues: WorkerIssueCallback[], state: EvidenceState) {
