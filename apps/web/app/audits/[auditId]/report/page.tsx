@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, Download, FileCode2, Share2, Sparkles } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileCode2, Share2, Sparkles } from "lucide-react";
 import { createShare } from "@swarmproof/db";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
+import { BugReportDownloadLink } from "./bug-report-download";
 import { auditPreflightLabel, auditSuccessRate, auditTimeToValue, bugReportForAudit, suggestedFixesForAudit } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
@@ -148,10 +149,13 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                 Playwright regression test
                 <FileCode2 className="h-4 w-4 text-indigo" aria-hidden="true" />
               </Link>
-              <a className="inline-flex min-h-11 items-center justify-between gap-3 rounded-ui border border-line px-4 py-3 font-semibold hover:bg-mist" href={`data:text/markdown;charset=utf-8,${encodeURIComponent(bugReport)}`} download="swarmproof-bug-report.md">
-                PM-ready bug report
-                <Download className="h-4 w-4 text-indigo" aria-hidden="true" />
-              </a>
+              <BugReportDownloadLink
+                href={`data:text/markdown;charset=utf-8,${encodeURIComponent(bugReport)}`}
+                targetKind={audit.preflight?.isDemoTarget ? "demo" : "public"}
+                issueCount={audit.issues.length}
+                score={audit.score}
+                outcome={report?.outcome ?? audit.status}
+              />
               <p className="rounded-ui bg-crimson/10 p-3 text-sm leading-6 text-crimson">
                 <AlertTriangle className="mr-1 inline h-4 w-4" aria-hidden="true" />
                 No private URLs, credentials, screenshots, or raw target-page text are sent to Novus events.
