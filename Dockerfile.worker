@@ -1,0 +1,18 @@
+FROM mcr.microsoft.com/playwright:v1.61.0-noble
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/browser-worker/package.json apps/browser-worker/package.json
+COPY packages/types/package.json packages/types/package.json
+
+RUN pnpm install --frozen-lockfile
+
+COPY apps/browser-worker apps/browser-worker
+COPY packages/types packages/types
+
+ENV BROWSER_PROVIDER=local-playwright
+
+CMD ["pnpm", "--filter", "@swarmproof/browser-worker", "dev"]
