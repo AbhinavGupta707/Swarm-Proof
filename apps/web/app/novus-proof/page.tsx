@@ -1,21 +1,67 @@
-import { Events } from "@swarmproof/events";
+import { BarChart3, CheckCircle2, LockKeyhole, RadioTower } from "lucide-react";
+import { demoAudit } from "@/lib/demo-data";
 
 export default function NovusProofPage() {
   return (
-    <main className="section">
+    <main className="section surface-grid">
       <div className="page-shell">
-        <p className="font-mono text-sm font-semibold text-indigo">Novus proof</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-normal">Event funnel scaffold</h1>
-        <p className="mt-4 max-w-3xl leading-7 text-slate-700">
-          This page mirrors safe local event names. The analytics workstream will connect the wrapper to Novus credentials.
-        </p>
-        <div className="mt-8 grid gap-3 md:grid-cols-2">
-          {Object.values(Events).map((eventName) => (
-            <div key={eventName} className="rounded-ui border border-line bg-panel p-4 font-mono text-sm">
-              {eventName}
-            </div>
-          ))}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="font-mono text-sm font-semibold text-indigo">Novus proof</p>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">Safe event funnel for the demo audit.</h1>
+            <p className="mt-4 max-w-3xl leading-7 text-slate-700">
+              This local proof mirrors the Novus-ready event contract. Production credentials can connect the same names without sending raw target-page content, credentials, screenshots, or private URLs.
+            </p>
+          </div>
+          <div className="rounded-ui border border-line bg-panel px-4 py-3">
+            <p className="flex items-center gap-2 font-mono text-sm font-semibold text-emerald">
+              <RadioTower className="h-4 w-4" aria-hidden="true" />
+              local event mirror active
+            </p>
+          </div>
         </div>
+
+        <section className="mt-8 grid gap-4 md:grid-cols-3">
+          <div className="rounded-ui border border-line bg-panel p-5">
+            <BarChart3 className="h-5 w-5 text-indigo" aria-hidden="true" />
+            <p className="mt-4 font-mono text-3xl font-semibold">28</p>
+            <p className="mt-1 text-sm text-slate-600">Safe events in demo path</p>
+          </div>
+          <div className="rounded-ui border border-line bg-panel p-5">
+            <CheckCircle2 className="h-5 w-5 text-emerald" aria-hidden="true" />
+            <p className="mt-4 font-mono text-3xl font-semibold">6</p>
+            <p className="mt-1 text-sm text-slate-600">Required funnel events represented</p>
+          </div>
+          <div className="rounded-ui border border-line bg-panel p-5">
+            <LockKeyhole className="h-5 w-5 text-crimson" aria-hidden="true" />
+            <p className="mt-4 font-mono text-3xl font-semibold">0</p>
+            <p className="mt-1 text-sm text-slate-600">Raw content fields in analytics</p>
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-ui border border-line bg-panel p-5">
+          <h2 className="text-lg font-semibold">Event contract</h2>
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[44rem] border-collapse text-left text-sm">
+              <thead className="border-b border-line text-slate-600">
+                <tr>
+                  <th className="py-3 pr-4 font-semibold">Event</th>
+                  <th className="py-3 pr-4 font-semibold">Count</th>
+                  <th className="py-3 pr-4 font-semibold">Allowed properties</th>
+                </tr>
+              </thead>
+              <tbody>
+                {demoAudit.novusEvents.map((event) => (
+                  <tr key={event.name} className="border-b border-line last:border-b-0">
+                    <td className="py-3 pr-4 font-mono font-semibold">{event.name}</td>
+                    <td className="py-3 pr-4 font-mono">{event.count}</td>
+                    <td className="py-3 pr-4 text-slate-700">{event.safeProps.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </main>
   );

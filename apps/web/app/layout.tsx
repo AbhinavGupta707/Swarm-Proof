@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Activity, ShieldCheck } from "lucide-react";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,22 +12,38 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <header className="border-b border-line bg-panel">
-          <nav className="page-shell flex min-h-16 items-center justify-between gap-4">
-            <Link className="font-mono text-sm font-semibold tracking-normal text-ink" href="/">
-              SwarmProof
+        <header className="sticky top-0 z-20 border-b border-line bg-panel/95 backdrop-blur">
+          <nav className="page-shell flex min-h-16 items-center justify-between gap-3">
+            <Link className="inline-flex min-h-11 items-center gap-2 font-mono text-sm font-semibold tracking-normal text-ink" href="/">
+              <span className="grid h-8 w-8 place-items-center rounded-ui bg-ink text-white">
+                <Activity className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <span>SwarmProof</span>
             </Link>
-            <div className="flex items-center gap-2 text-sm">
-              <Link className="rounded-ui px-3 py-2 hover:bg-mist" href="/audits/new">
-                New audit
+            <div className="flex items-center gap-1 text-sm sm:gap-2">
+              <Link className="hidden min-h-11 items-center rounded-ui px-3 py-2 font-medium hover:bg-mist sm:inline-flex" href="/demo-target">
+                Demo target
               </Link>
-              <Link className="rounded-ui px-3 py-2 hover:bg-mist" href="/novus-proof">
+              <Link className="hidden min-h-11 items-center rounded-ui px-3 py-2 font-medium hover:bg-mist sm:inline-flex" href="/settings/privacy">
+                Privacy
+              </Link>
+              <Link className="inline-flex min-h-11 items-center rounded-ui px-3 py-2 font-medium hover:bg-mist" href="/novus-proof">
                 Novus proof
+              </Link>
+              <Link className="inline-flex min-h-11 items-center gap-2 rounded-ui bg-ink px-3 py-2 font-semibold text-white hover:bg-slate-800" href="/audits/new">
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                New audit
               </Link>
             </div>
           </nav>
         </header>
         {children}
+        <footer className="border-t border-line bg-panel">
+          <div className="page-shell flex flex-wrap items-center justify-between gap-3 py-6 text-sm text-slate-600">
+            <p>Built for the June 20, 2026 5:00 PM BST hackathon deadline.</p>
+            <p>Deterministic demo mode keeps the public path reliable.</p>
+          </div>
+        </footer>
       </body>
     </html>
   );
