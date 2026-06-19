@@ -1,3 +1,4 @@
+import { createAiProvider, externalActionPlannerSystemPrompt, type AiProvider } from "@swarmproof/ai";
 import type { PersonaMode } from "@swarmproof/types";
 import { shouldSkipExternalAction } from "./safety";
 
@@ -16,29 +17,38 @@ export type ExternalCandidate = {
 export type PlannedExternalAction =
   | { type: "click"; candidate: ExternalCandidate; reason: string; score: number }
   | { type: "fill"; candidate: ExternalCandidate; value: string; reason: string; score: number }
+  | { type: "done"; reason: string; evidence: string; score: number }
+  | { type: "fail"; reason: string; evidence: string; score: number }
   | { type: "none"; reason: string; score: 0 };
 
-export function planExternalAction(input: {
+type PlanExternalActionInput = {
   goal: string;
   personaMode: PersonaMode;
   candidates: ExternalCandidate[];
   allowFormActions?: boolean;
   visitedHrefs?: string[];
   usedOrdinals?: number[];
-}): PlannedExternalAction {
+};
+
+type AiPlannerDecision = {
+  action?: "choose_candidate" | "observe" | "done" | "fail";
+  ordinal?: number;
+  reason?: string;
+  evidence?: string;
+};
+
+export function planExternalAction(input: PlanExternalActionInput): PlannedExternalAction {
   const visited = new Set((input.visitedHrefs ?? []).map(normalizeUrlKey));
   const usedOrdinals = new Set(input.usedOrdinals ?? []);
   const goalTokens = meaningfulTokens(input.goal);
-  const scored = input.candidates
-    .filter((candidate) => !usedOrdinals.has(candidate.ordinal))
-    .map((candidate) => scoreCandidate(candidate, {
-      goalTokens,
-      personaMode: input.personaMode,
-      allowFormActions: Boolean(input.allowFormActions),
-      visited
-    }))
-    .filter((candidate): candidate is ScoredCandidate => candidate !== undefined)
-    .sort((left, right) => right.score - left.score);
+  const context = {
+    goalTokens,
+    personaMode: input.personaMode,
+    allowFormActions: Boolean(input.allowFormActions),
+    visited,
+    usedOrdinals
+  };
+  const scored = scoreCandidates(input.candidates, context);
 
   const best = scored[0];
   if (!best || best.score < 8) {
@@ -49,21 +59,139 @@ export function planExternalAction(input: {
     };
   }
 
-  if (best.candidate.kind === "input") {
+  return planForScoredCandidate(best, input.goal);
+}
+
+export async function planExternalActionWithAi(input: PlanExternalActionInput & {
+  page: { url: string; title: string };
+  history?: string[];
+  aiProvider?: AiProvider;
+  timeoutMs?: number;
+}): Promise<PlannedExternalAction> {
+  const fallback = planExternalAction(input);
+  const aiProvider = input.aiProvider;
+  if (!aiProvider && !process.env.FIREWORKS_API_KEY) {
+    return fallback;
+  }
+
+  const decision = await withTimeout(
+    (aiProvider ?? createAiProvider()).generateJson<AiPlannerDecision>({
+      system: externalActionPlannerSystemPrompt,
+      prompt: buildAiPlannerPrompt(input),
+      fallback: { action: "observe", reason: "AI planner fallback." }
+    }),
+    input.timeoutMs ?? 4500,
+    { action: "observe", reason: "AI planner timed out." }
+  );
+  return validateAiDecision(decision, input, fallback);
+}
+
+export function isExecutableExternalPlan(
+  plan: PlannedExternalAction
+): plan is Extract<PlannedExternalAction, { type: "click" | "fill" }> {
+  return plan.type === "click" || plan.type === "fill";
+}
+
+function validateAiDecision(
+  decision: AiPlannerDecision,
+  input: PlanExternalActionInput,
+  fallback: PlannedExternalAction
+): PlannedExternalAction {
+  if (!decision || typeof decision !== "object") {
+    return fallback;
+  }
+
+  const reason = normalizeReason(decision.reason);
+  if (decision.action === "observe") {
+    if (isExecutableExternalPlan(fallback)) {
+      return fallback;
+    }
+
+    return {
+      type: "none",
+      reason: reason || "AI planner chose to observe rather than execute a public-site action.",
+      score: 0
+    };
+  }
+
+  if (decision.action === "done" && reason) {
+    return {
+      type: "done",
+      reason,
+      evidence: normalizeReason(decision.evidence) || reason,
+      score: 100
+    };
+  }
+
+  if (decision.action === "fail" && reason) {
+    return {
+      type: "fail",
+      reason,
+      evidence: normalizeReason(decision.evidence) || reason,
+      score: 0
+    };
+  }
+
+  if (decision.action !== "choose_candidate" || !Number.isInteger(decision.ordinal)) {
+    return fallback;
+  }
+
+  const candidate = input.candidates.find((item) => item.ordinal === decision.ordinal);
+  if (!candidate) {
+    return fallback;
+  }
+
+  const visited = new Set((input.visitedHrefs ?? []).map(normalizeUrlKey));
+  const usedOrdinals = new Set(input.usedOrdinals ?? []);
+  const scored = scoreCandidate(candidate, {
+    goalTokens: meaningfulTokens(input.goal),
+    personaMode: input.personaMode,
+    allowFormActions: Boolean(input.allowFormActions),
+    visited,
+    usedOrdinals
+  });
+  if (!scored) {
+    return fallback;
+  }
+
+  return planForScoredCandidate({
+    ...scored,
+    reason: reason || `AI chose validated candidate: ${scored.candidate.label}.`
+  }, input.goal);
+}
+
+function scoreCandidates(
+  candidates: ExternalCandidate[],
+  context: {
+    goalTokens: string[];
+    personaMode: PersonaMode;
+    allowFormActions: boolean;
+    visited: Set<string>;
+    usedOrdinals: Set<number>;
+  }
+) {
+  return candidates
+    .map((candidate) => scoreCandidate(candidate, context))
+    .filter((candidate): candidate is ScoredCandidate => candidate !== undefined)
+    .sort((left, right) => right.score - left.score);
+}
+
+function planForScoredCandidate(scored: ScoredCandidate, goal: string): PlannedExternalAction {
+  if (scored.candidate.kind === "input") {
     return {
       type: "fill",
-      candidate: best.candidate,
-      value: fillValueFor(best.candidate, input.goal),
-      reason: best.reason,
-      score: best.score
+      candidate: scored.candidate,
+      value: fillValueFor(scored.candidate, goal),
+      reason: scored.reason,
+      score: scored.score
     };
   }
 
   return {
     type: "click",
-    candidate: best.candidate,
-    reason: best.reason,
-    score: best.score
+    candidate: scored.candidate,
+    reason: scored.reason,
+    score: scored.score
   };
 }
 
@@ -80,11 +208,12 @@ function scoreCandidate(
     personaMode: PersonaMode;
     allowFormActions: boolean;
     visited: Set<string>;
+    usedOrdinals: Set<number>;
   }
 ): ScoredCandidate | undefined {
   const label = normalizeLabel(candidate.label);
   const lowerLabel = label.toLowerCase();
-  if (!label || candidate.disabled || shouldSkipExternalAction(label) || isCredentialBoundaryLabel(lowerLabel)) {
+  if (!label || candidate.disabled || context.usedOrdinals.has(candidate.ordinal) || shouldSkipExternalAction(label) || isCredentialBoundaryLabel(lowerLabel)) {
     return undefined;
   }
 
@@ -102,7 +231,7 @@ function scoreCandidate(
   const matchedGoalTokens = context.goalTokens.filter((token) => lowerLabel.includes(token));
   score += matchedGoalTokens.length * 7;
 
-  if (/\b(get started|start|try|demo|learn|docs|documentation|pricing|contact|create|invite|sign up|signup|join)\b/i.test(label)) {
+  if (/\b(get started|start|try|demo|learn|learn more|docs|documentation|pricing|contact|create|invite|sign up|signup|join|shop|buy|compare|customize|choose|select|configure)\b/i.test(label)) {
     score += 8;
   }
 
@@ -115,6 +244,10 @@ function scoreCandidate(
   }
 
   if (context.personaMode === "mobile" && /\b(menu|open|start|get started)\b/i.test(label)) {
+    score += 4;
+  }
+
+  if (context.personaMode === "chaos" && /\b(compare|learn|details|reviews|change|customize|configure|back)\b/i.test(label)) {
     score += 4;
   }
 
@@ -161,6 +294,57 @@ function fillValueFor(candidate: ExternalCandidate, goal: string) {
   }
 
   return "SwarmProof test";
+}
+
+function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: string; title: string }; history?: string[] }) {
+  const candidates = input.candidates.slice(0, 50).map((candidate) => ({
+    ordinal: candidate.ordinal,
+    kind: candidate.kind,
+    label: candidate.label,
+    href: candidate.href,
+    sameOrigin: candidate.sameOrigin ?? true,
+    inputType: candidate.inputType,
+    disabled: candidate.disabled,
+    blocked: shouldSkipExternalAction(candidate.label) || isCredentialBoundaryLabel(candidate.label.toLowerCase())
+  }));
+
+  return JSON.stringify({
+    schema: {
+      action: "choose_candidate | observe | done | fail",
+      ordinal: "required only when action is choose_candidate; must be one of the provided ordinals",
+      reason: "short evidence-based reason",
+      evidence: "short page/history evidence for done or fail"
+    },
+    safetyPolicy: [
+      "Choose only a provided candidate ordinal.",
+      "Safe exploration includes Buy, Shop, Compare, Customize, Choose, Select, Learn more, and same-origin product/configuration links.",
+      "Do not choose Add to Bag, Checkout, Place Order, Pay, Confirm, Subscribe, Book, Reserve, Delete, Logout, credential, payment, or private-data actions.",
+      "If only unsafe commitment actions remain, return observe with a truthful safety reason."
+    ],
+    goal: input.goal,
+    personaMode: input.personaMode,
+    page: input.page,
+    history: (input.history ?? []).slice(-8),
+    candidates
+  });
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutValue: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(timeoutValue), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function normalizeReason(value: unknown) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 220) : "";
 }
 
 function meaningfulTokens(value: string) {

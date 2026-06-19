@@ -154,6 +154,100 @@ test("evidence report synthesis links worker steps, artifacts, bug export, and g
   assert.match(overview.generatedTest, /expect/);
 });
 
+test("external evidence reports and generated tests use target-specific evidence instead of demo assertions", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://www.apple.com/macbook-air/",
+    goal: "I want to buy a MacBook Air, inspect configuration choices, and stop before checkout.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+  assert.equal(plan.requests[0]?.runMode, "external-public");
+
+  const stepOne = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open the public product page.",
+    result: "Loaded \"MacBook Air\".",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: "https://www.apple.com/macbook-air/"
+  });
+  const runningJob = getAuditEvents(created.audit.id).jobs[0];
+  assert.equal(runningJob?.status, "RUNNING");
+  assert.equal(typeof runningJob?.lockedAt, "string");
+
+  const stepTwo = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 2,
+    action: "click_link",
+    status: "passed",
+    thought: "Follow the safe product purchase path.",
+    result: "Clicked \"Buy MacBook Air\". Navigated to https://www.apple.com/shop/buy-mac/macbook-air/. Current page title is \"Buy MacBook Air\".",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: "https://www.apple.com/shop/buy-mac/macbook-air/"
+  });
+
+  const stepThree = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 3,
+    action: "click_button",
+    status: "passed",
+    thought: "Inspect safe configuration choices.",
+    result: "Clicked \"Customize\". Page stayed on the same URL. Current page title is \"Buy MacBook Air\".",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: "https://www.apple.com/shop/buy-mac/macbook-air/"
+  });
+
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: false,
+    status: "BLOCKED",
+    summary: "The worker reached MacBook Air configuration choices and stopped before cart or checkout.",
+    issues: [
+      {
+        severity: "LOW",
+        category: "Safety stop",
+        title: "Audit stopped before checkout or commitment",
+        description: "The runner explored the public product path, then stopped before commitment actions: \"Add to Bag\".",
+        evidenceStepIds: [stepOne.id, stepTwo.id],
+        suggestedFix: "Keep pricing and configuration review available before cart or checkout."
+      },
+      {
+        severity: "LOW",
+        category: "Safety stop",
+        title: "Audit stopped before checkout or commitment",
+        description: "A second persona saw the same Add to Bag commitment boundary.",
+        evidenceStepIds: [stepThree.id],
+        suggestedFix: "Add a non-committing summary state for QA."
+      }
+    ]
+  });
+
+  const overview = getAuditOverview(created.audit.id);
+  assert.equal(overview.issues.length, 1);
+  assert.equal(overview.issues[0]?.evidenceStepIds?.length, 3);
+  assert.match(overview.report?.summary ?? "", /Safety stop/);
+  assert.match(overview.report?.markdown ?? "", /User impact/);
+  assert.match(overview.report?.markdown ?? "", /Regression-test note/);
+  assert.match(overview.generatedTest, /Buy MacBook Air/);
+  assert.match(overview.generatedTest, /Customize/);
+  assert.doesNotMatch(overview.generatedTest, /project|people|invite|error/i);
+});
+
 test("AI report synthesis falls back deterministically when no provider key is configured", async () => {
   resetMemoryStoreForTests();
   const hadProviderKey = Object.prototype.hasOwnProperty.call(process.env, "FIREWORKS_API_KEY");

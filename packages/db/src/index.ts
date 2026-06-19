@@ -990,6 +990,7 @@ export function recordWorkerStep(input: WorkerStepCallback) {
     artifactId: input.artifactId ?? artifact?.id
   });
   run.status = "RUNNING";
+  markJobRunningForRun(audit, run);
   touch(audit);
   appendEvent("browser_step_completed", audit.id, { persona: run.mode, stepIndex: step.stepIndex });
   return step;
@@ -1194,6 +1195,21 @@ function addStep(
 }
 
 function addIssue(audit: AuditRecord, issue: Omit<AuditIssueSummary, "id">) {
+  const existing = audit.issues.find((candidate) => issueDedupeKey(candidate) === issueDedupeKey(issue));
+  if (existing) {
+    existing.severity = severityRank(issue.severity) > severityRank(existing.severity) ? issue.severity : existing.severity;
+    existing.description = existing.description.length >= issue.description.length ? existing.description : issue.description;
+    existing.evidenceStepIds = [...new Set([...(existing.evidenceStepIds ?? []), ...(issue.evidenceStepIds ?? [])])];
+    existing.suggestedFix = existing.suggestedFix ?? issue.suggestedFix;
+    existing.generatedTest = existing.generatedTest ?? issue.generatedTest;
+    appendEvent("issue_deduped", audit.id, {
+      severity: existing.severity,
+      category: existing.category,
+      issueCount: audit.issues.length
+    });
+    return existing;
+  }
+
   const record: AuditIssueSummary = { id: createId("issue"), ...issue };
   audit.issues.push(record);
   appendEvent("issue_detected", audit.id, {
@@ -1214,6 +1230,11 @@ function buildReportSummary(audit: AuditRecord) {
   if (!audit.preflight.isDemoTarget) {
     if (audit.issues.some((issue) => issue.category === "Execution setup")) {
       return `The target passed safety checks, but browser execution did not complete beyond ${pluralize(stats.stepCount, "evidence step")}.`;
+    }
+
+    const stopReason = externalStopReason(audit);
+    if (stopReason) {
+      return stopReason;
     }
 
     if (audit.provider === "local-playwright") {
@@ -1321,6 +1342,38 @@ function findingClause(stats: EvidenceStats) {
   return `found ${pluralize(stats.issueCount, "issue")}${topIssue}`;
 }
 
+function externalStopReason(audit: AuditRecord) {
+  const runHadBlocker = audit.runs.some((run) => run.status !== "SUCCEEDED");
+  const issue = audit.issues.find((candidate) => candidate.category === "Auth-limited flow")
+    ?? audit.issues.find((candidate) => candidate.category === "Safety stop")
+    ?? audit.issues.find((candidate) => candidate.category === "Agent uncertainty")
+    ?? audit.issues.find((candidate) => ["Execution", "Execution setup"].includes(candidate.category))
+    ?? audit.issues.find((candidate) => ["Console", "Network"].includes(candidate.category) && runHadBlocker)
+    ?? audit.issues.find((candidate) => !["Console", "Network"].includes(candidate.category));
+  if (!issue) {
+    return undefined;
+  }
+
+  const stats = collectEvidenceStats(audit);
+  if (issue.category === "Auth-limited flow") {
+    return `Auth-limited stop: SwarmProof collected ${pluralize(stats.stepCount, "evidence step")} but found a strong login, password, CAPTCHA, or verification boundary before the goal could continue.`;
+  }
+
+  if (issue.category === "Safety stop") {
+    return `Safety stop: SwarmProof safely explored ${pluralize(stats.stepCount, "evidence step")} and stopped before cart, checkout, payment, private data, or another irreversible commitment.`;
+  }
+
+  if (issue.category === "Agent uncertainty") {
+    return `Agent uncertainty: SwarmProof loaded the public target but could not identify a safe, goal-relevant next step from the visible page evidence.`;
+  }
+
+  if (["Execution", "Execution setup"].includes(issue.category) || (["Console", "Network"].includes(issue.category) && runHadBlocker)) {
+    return `Technical failure: SwarmProof reached the target but browser execution, console, network, or worker setup issues limited the audit.`;
+  }
+
+  return `Product friction: SwarmProof collected ${pluralize(stats.stepCount, "evidence step")} and found goal-relevant friction, led by "${issue.title}".`;
+}
+
 function formatRunEvidence(audit: AuditRecord, run: AuditRunSummary) {
   const steps = (run.steps ?? []).slice(0, 8).map((step) => formatStepEvidence(audit, { run, step })).join("\n");
   return `### ${run.persona}
@@ -1346,18 +1399,23 @@ function formatBugExport(audit: AuditRecord, issue: AuditIssueSummary, index: nu
   const evidence = evidenceForIssue(audit, issue).slice(0, 5);
   const reproSteps = evidence.map(({ step }, stepIndex) => `${stepIndex + 1}. ${humanizeAction(step.action)}: ${safeLine(step.result, 220)}`).join("\n");
   const evidenceRefs = evidence.map(({ step }) => step.artifactId ?? step.id).join(", ");
+  const likelyArea = likelyAreaForIssue(issue);
+  const suggestedImplementation = implementationHintForIssue(issue);
 
   return `### Bug ${index}: ${issue.title}
 - Severity: ${issue.severity}
 - Area: ${issue.category}
 - Target: ${displayTarget(audit)}
 - Goal: ${audit.goal}
+- User impact: ${userImpactForIssue(issue)}
+- Likely area: ${likelyArea}
 - Actual: ${safeLine(issue.description)}
 - Expected: User can complete "${safeLine(audit.goal, 180)}" without this blocker.
 - Repro steps:
 ${reproSteps || "1. Re-run the SwarmProof persona and inspect the linked issue."}
 - Evidence refs: ${evidenceRefs || "No explicit step references"}
-- Suggested fix: ${safeLine(issue.suggestedFix ?? "Review the affected flow.")}`;
+- Suggested implementation: ${suggestedImplementation}
+- Regression-test note: Add or update a Playwright test that follows the linked repro steps and asserts the corrected, non-committing user-visible state.`;
 }
 
 function formatArtifactReference(audit: AuditRecord, artifact: ArtifactSummary) {
@@ -1498,6 +1556,52 @@ function severityRank(severity: AuditIssueSummary["severity"]) {
   return 1;
 }
 
+function issueDedupeKey(issue: Pick<AuditIssueSummary, "category" | "title">) {
+  return `${issue.category.toLowerCase().replace(/\s+/g, " ")}:${issue.title.toLowerCase().replace(/\s+/g, " ")}`;
+}
+
+function userImpactForIssue(issue: AuditIssueSummary) {
+  if (issue.category === "Safety stop") {
+    return "Users can inspect the public product path, but QA must stop before irreversible commerce or private-data actions.";
+  }
+
+  if (issue.category === "Auth-limited flow") {
+    return "Unauthenticated users cannot continue the audited goal without login, verification, or owner-provided test access.";
+  }
+
+  if (issue.category === "Agent uncertainty") {
+    return "A first-time user may not see a clear safe next action for the stated goal.";
+  }
+
+  if (["Execution", "Execution setup", "Console", "Network"].includes(issue.category)) {
+    return "The audit evidence is limited by a technical blocker that should be checked before trusting the flow.";
+  }
+
+  return "Users may lose momentum or confidence while trying to complete the stated goal.";
+}
+
+function likelyAreaForIssue(issue: AuditIssueSummary) {
+  if (issue.category === "Safety stop") return "Public product/configuration flow before checkout";
+  if (issue.category === "Auth-limited flow") return "Authentication, verification, or access gating";
+  if (issue.category === "Agent uncertainty") return "CTA labeling, navigation, and information architecture";
+  if (issue.category === "Console") return "Frontend runtime";
+  if (issue.category === "Network") return "Network/API or asset loading";
+  if (issue.category === "Execution setup") return "SwarmProof worker configuration";
+  return issue.category;
+}
+
+function implementationHintForIssue(issue: AuditIssueSummary) {
+  if (issue.category === "Safety stop") {
+    return safeLine(issue.suggestedFix ?? "Expose product configuration and pricing review states before Add to Bag, Checkout, Pay, or private-data collection.");
+  }
+
+  if (issue.category === "Auth-limited flow") {
+    return safeLine(issue.suggestedFix ?? "Provide a public unauthenticated path for the audited goal, or add a future owner-approved authenticated test setup.");
+  }
+
+  return safeLine(issue.suggestedFix ?? "Review the affected flow, clarify the visible CTA or state, and verify the behavior with an evidence-backed Playwright regression.");
+}
+
 function calculateScore(audit: AuditRecord) {
   const penalty = audit.issues.reduce((total, issue) => {
     if (issue.severity === "CRITICAL") return total + 35;
@@ -1601,6 +1705,16 @@ function finishJobForRun(audit: AuditRecord, run: AuditRunSummary) {
   if (run.status === "FAILED" || run.status === "BLOCKED") {
     job.lastError = run.summary;
   }
+}
+
+function markJobRunningForRun(audit: AuditRecord, run: AuditRunSummary) {
+  const job = audit.jobs.find((candidate) => candidate.runId === run.id);
+  if (!job || !["QUEUED", "DISPATCHED"].includes(job.status)) return;
+
+  const now = new Date().toISOString();
+  job.status = "RUNNING";
+  job.lockedAt = job.lockedAt ?? now;
+  job.updatedAt = now;
 }
 
 function createArtifact(

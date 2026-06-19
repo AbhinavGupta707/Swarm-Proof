@@ -1,8 +1,8 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { WorkerCompleteCallback, WorkerIssueCallback, WorkerRunAgentRequest, WorkerStepCallback } from "@swarmproof/types";
 import type { CallbackPoster } from "./deterministic-runner";
-import { planExternalAction, type ExternalCandidate } from "./external-planner";
-import { isCrossOriginNavigation, isLikelyAuthWall, isUnsafeWorkerUrl, type WorkerSafetyOptions } from "./safety";
+import { isExecutableExternalPlan, planExternalActionWithAi, type ExternalCandidate, type PlannedExternalAction } from "./external-planner";
+import { commitmentStopReason, hasStrongAuthWallSignals, isCrossOriginNavigation, isUnsafeWorkerUrl, type WorkerSafetyOptions } from "./safety";
 
 type EvidenceState = {
   stepIds: string[];
@@ -37,6 +37,7 @@ export async function runLocalPlaywrightAgent(input: WorkerRunAgentRequest, post
     });
 
     const page = await context.newPage();
+    await page.addInitScript("globalThis.__name = globalThis.__name || function(value) { return value; };");
     const targetOrigin = new URL(input.targetUrl).origin;
 
     page.on("console", (message) => {
@@ -208,7 +209,9 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   const issues: WorkerIssueCallback[] = [];
   const visitedHrefs = new Set<string>();
   const usedOrdinals = new Set<number>();
+  const history: string[] = [];
   let actionsTaken = 0;
+  let stoppedForSafety = false;
 
   await page.goto(input.targetUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
   visitedHrefs.add(page.url());
@@ -219,14 +222,15 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     result: `Loaded ${await safeTitle(page)}.`,
     page
   });
+  history.push(`Loaded ${redactUrl(page.url())}.`);
 
-  const bodyText = await visibleText(page);
-  if (isLikelyAuthWall(bodyText)) {
+  const initialAuthWall = await detectAuthWall(page);
+  if (initialAuthWall.blocked) {
     issues.push({
       severity: "MEDIUM",
       category: "Auth-limited flow",
       title: "Audit reached an auth or verification wall",
-      description: "The public page appears to require login, password entry, CAPTCHA, payment, or verification before the goal can continue.",
+      description: `The public page showed a strong authentication or verification signal before the goal could continue: ${initialAuthWall.reason}.`,
       evidenceStepIds: [...state.stepIds],
       suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future authenticated-testing setup."
     });
@@ -239,16 +243,19 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     return;
   }
 
-  const maxAgentSteps = Math.max(2, Math.min(input.maxSteps - 1, 5));
+  const maxAgentSteps = Math.max(2, Math.min(input.maxSteps - 1, 4));
   for (let offset = 0; offset < maxAgentSteps; offset += 1) {
     const candidates = await collectInteractiveCandidates(page, new URL(input.targetUrl).origin);
-    const plan = planExternalAction({
+    const commitmentStops = commitmentStopsForCandidates(candidates);
+    const plan = await planExternalActionWithAi({
       goal: input.goal,
       personaMode: input.persona.mode,
       candidates,
       allowFormActions: Boolean(input.allowExternalFormSubmissions),
       visitedHrefs: [...visitedHrefs],
-      usedOrdinals: [...usedOrdinals]
+      usedOrdinals: [...usedOrdinals],
+      page: { url: page.url(), title: await safeTitleText(page) },
+      history
     });
 
     if (plan.type === "none") {
@@ -257,17 +264,66 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
         action: "observe",
         status: "warning",
         thought: "Inspect visible controls and stop before risky public-site actions.",
-        result: `${await observeInteractiveSurface(page, candidates)} ${plan.reason}`,
+        result: `${await observeInteractiveSurface(page, candidates)} ${commitmentStops.length > 0 ? `Safety stop visible: ${formatCommitmentStops(commitmentStops)}.` : plan.reason}`,
+        page
+      });
+      if (commitmentStops.length > 0 && actionsTaken > 0) {
+        stoppedForSafety = true;
+        issues.push({
+          severity: "LOW",
+          category: "Safety stop",
+          title: "Audit stopped before checkout or commitment",
+          description: `The runner explored the public product path, then stopped before commitment actions: ${formatCommitmentStops(commitmentStops)}.`,
+          evidenceStepIds: [...state.stepIds],
+          suggestedFix: "Keep pricing and configuration review available before cart or checkout, and add a non-committing summary state that QA can assert safely."
+        });
+      } else {
+        issues.push({
+          severity: "LOW",
+          category: "Exploration limit",
+          title: "No safe goal-relevant public action was selected",
+          description: "The runner observed the page but did not click or submit risky, cross-origin, purchase, logout, credential, or destructive actions.",
+          evidenceStepIds: [...state.stepIds],
+          suggestedFix: "Provide a public unauthenticated goal with a safe same-origin CTA, or enable a future owner-confirmed form-submission mode."
+        });
+      }
+      break;
+    }
+
+    if (plan.type === "done") {
+      await emitStep(input, postCallback, state, {
+        stepIndex: offset + 2,
+        action: "done",
+        status: "passed",
+        thought: plan.reason,
+        result: `Planner found enough evidence to stop: ${plan.evidence}`,
+        page
+      });
+      history.push(`Done: ${plan.evidence}`);
+      break;
+    }
+
+    if (plan.type === "fail") {
+      await emitStep(input, postCallback, state, {
+        stepIndex: offset + 2,
+        action: "fail",
+        status: "failed",
+        thought: plan.reason,
+        result: `Planner could not continue safely: ${plan.evidence}`,
         page
       });
       issues.push({
         severity: "LOW",
-        category: "Exploration limit",
-        title: "No safe goal-relevant public action was selected",
-        description: "The runner observed the page but did not click or submit risky, cross-origin, purchase, logout, credential, or destructive actions.",
+        category: "Agent uncertainty",
+        title: "Agent could not find a safe next step",
+        description: plan.evidence,
         evidenceStepIds: [...state.stepIds],
-        suggestedFix: "Provide a public unauthenticated goal with a safe same-origin CTA, or enable a future owner-confirmed form-submission mode."
+        suggestedFix: "Check whether the page exposes goal-relevant CTAs with visible, specific labels before private or commitment steps."
       });
+      break;
+    }
+
+    if (!isExecutableExternalPlan(plan)) {
       break;
     }
 
@@ -292,6 +348,7 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       result: result.message,
       page
     });
+    history.push(`${plan.type}: ${plan.candidate.label} -> ${result.message}`);
 
     if (!result.ok) {
       issues.push({
@@ -305,13 +362,13 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       break;
     }
 
-    const updatedText = await visibleText(page);
-    if (isLikelyAuthWall(updatedText)) {
+    const authWall = await detectAuthWall(page);
+    if (authWall.blocked) {
       issues.push({
         severity: "MEDIUM",
         category: "Auth-limited flow",
         title: "Audit reached an auth or verification wall",
-        description: "After a safe public action, the page appears to require login, password entry, CAPTCHA, payment, or verification before the goal can continue.",
+        description: `After a safe public action, the page showed a strong authentication or verification signal: ${authWall.reason}.`,
         evidenceStepIds: [...state.stepIds],
         suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future authenticated-testing setup."
       });
@@ -320,10 +377,13 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   }
 
   addConsoleAndNetworkIssues(issues, state);
+  const authLimited = issues.some((issue) => issue.category === "Auth-limited flow");
   await complete(input, postCallback, state, {
-    success: !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL" || issue.category === "Auth-limited flow"),
-    status: issues.some((issue) => issue.category === "Auth-limited flow") ? "BLOCKED" : "SUCCEEDED",
-    summary: actionsTaken > 0
+    success: !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL"),
+    status: authLimited || stoppedForSafety ? "BLOCKED" : "SUCCEEDED",
+    summary: stoppedForSafety
+      ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), then stopped before cart, checkout, payment, or private-data commitment.`
+      : actionsTaken > 0
       ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s).`
       : "The local Playwright worker loaded the public URL but stopped before unsafe or irrelevant actions.",
     issues
@@ -424,12 +484,86 @@ async function isCreateAccountCtaClipped(page: Page) {
 }
 
 async function safeTitle(page: Page) {
-  const title = (await page.title().catch(() => "")) || new URL(page.url()).hostname;
-  return `"${title.slice(0, 80)}"`;
+  return `"${(await safeTitleText(page)).slice(0, 80)}"`;
 }
 
-async function visibleText(page: Page) {
-  return page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+async function safeTitleText(page: Page) {
+  return (await page.title().catch(() => "")) || new URL(page.url()).hostname;
+}
+
+async function detectAuthWall(page: Page) {
+  const signals = await page.evaluate(() => {
+    const elements = Array.from(document.querySelectorAll("main, [role='main'], form, dialog, [role='dialog'], section, article, body"));
+    const text = (document.body?.innerText ?? "").slice(0, 3000);
+    const passwordFieldCount = Array.from(document.querySelectorAll("input")).filter((element) => {
+      const input = element as HTMLInputElement;
+      return isVisible(input) && input.type.toLowerCase() === "password";
+    }).length;
+    const captchaCount = Array.from(document.querySelectorAll("iframe, div, input")).filter((element) => {
+      if (!isVisible(element)) return false;
+      const haystack = [
+        element.getAttribute("src"),
+        element.getAttribute("title"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("class"),
+        element.getAttribute("id"),
+        element.getAttribute("name")
+      ].filter(Boolean).join(" ");
+      return /\b(captcha|recaptcha|hcaptcha|turnstile)\b/i.test(haystack);
+    }).length;
+    const verificationFieldCount = Array.from(document.querySelectorAll("input, textarea")).filter((element) => {
+      if (!isVisible(element)) return false;
+      const input = element as HTMLInputElement | HTMLTextAreaElement;
+      const explicitLabel = input.id ? document.querySelector(`label[for="${cssEscape(input.id)}"]`)?.textContent ?? "" : "";
+      const haystack = [
+        explicitLabel,
+        input.getAttribute("aria-label"),
+        input.getAttribute("placeholder"),
+        input.getAttribute("name"),
+        input.getAttribute("autocomplete")
+      ].filter(Boolean).join(" ");
+      return /\b(verification code|two-factor|2fa|one-time code|security code|otp)\b/i.test(haystack);
+    }).length;
+    const accessDeniedPanelCount = elements.filter((element) => {
+      if (!isVisible(element)) return false;
+      const panelText = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 1000);
+      return /\b(access denied|unauthorized|authentication required|login required|sign in required|members only|private page)\b/i.test(panelText);
+    }).length;
+
+    return { visibleText: text, passwordFieldCount, captchaCount, verificationFieldCount, accessDeniedPanelCount };
+
+    function isVisible(element: Element) {
+      const htmlElement = element as HTMLElement;
+      const rect = htmlElement.getBoundingClientRect();
+      const style = window.getComputedStyle(htmlElement);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    }
+
+    function cssEscape(value: string) {
+      return value.replace(/["\\]/g, "\\$&");
+    }
+  }).catch(() => ({
+    visibleText: "",
+    passwordFieldCount: 0,
+    captchaCount: 0,
+    verificationFieldCount: 0,
+    accessDeniedPanelCount: 0
+  }));
+
+  if (!hasStrongAuthWallSignals(signals)) {
+    return { blocked: false, reason: "" };
+  }
+
+  const reasons = [
+    signals.passwordFieldCount > 0 ? "visible password field" : undefined,
+    signals.captchaCount > 0 ? "visible CAPTCHA or bot-verification widget" : undefined,
+    signals.verificationFieldCount > 0 ? "verification-code field" : undefined,
+    signals.accessDeniedPanelCount > 0 ? "access-denied or login-required panel" : undefined
+  ].filter(Boolean);
+  return {
+    blocked: true,
+    reason: reasons.join(", ") || "strong auth-wall text"
+  };
 }
 
 async function observeInteractiveSurface(page: Page, candidates?: ExternalCandidate[]) {
@@ -539,7 +673,7 @@ async function collectInteractiveCandidates(page: Page, targetOrigin: string): P
 
 async function executePlannedAction(
   page: Page,
-  plan: Exclude<ReturnType<typeof planExternalAction>, { type: "none" }>
+  plan: Extract<PlannedExternalAction, { type: "click" | "fill" }>
 ) {
   if (plan.type === "fill") {
     const filled = await page.evaluate(({ ordinal, value }) => {
@@ -608,6 +742,20 @@ function addConsoleAndNetworkIssues(issues: WorkerIssueCallback[], state: Eviden
       suggestedFix: "Review failing assets or API requests in the audited flow."
     });
   }
+}
+
+function commitmentStopsForCandidates(candidates: ExternalCandidate[]) {
+  return candidates
+    .map((candidate) => {
+      const reason = commitmentStopReason(candidate.label);
+      return reason ? { label: candidate.label, reason } : undefined;
+    })
+    .filter((item): item is { label: string; reason: string } => Boolean(item))
+    .slice(0, 4);
+}
+
+function formatCommitmentStops(stops: Array<{ label: string; reason: string }>) {
+  return stops.map((stop) => `"${stop.label}"`).join(", ");
 }
 
 function redactUrl(rawUrl: string) {

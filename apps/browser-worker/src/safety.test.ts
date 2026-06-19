@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isCrossOriginNavigation, isLikelyAuthWall, isUnsafeWorkerUrl, shouldSkipExternalAction } from "./safety";
+import { commitmentStopReason, hasStrongAuthWallSignals, isCrossOriginNavigation, isLikelyAuthWall, isUnsafeWorkerUrl, shouldSkipExternalAction } from "./safety";
 
 test("worker safety blocks local, private, metadata, and internal URLs", () => {
   const blocked = [
@@ -35,4 +35,39 @@ test("worker external navigation and action guards are conservative", () => {
   assert.equal(shouldSkipExternalAction("Delete workspace"), true);
   assert.equal(shouldSkipExternalAction("View docs"), false);
   assert.equal(isLikelyAuthWall("Please log in with your password to continue"), true);
+});
+
+test("Apple-like nav/footer sign-in text does not trigger an auth wall", () => {
+  const publicProductText = `
+    MacBook Air
+    Apple Intelligence. Now with the M4 chip.
+    Buy MacBook Air
+    Learn more
+    Compare all Mac models
+    Sign in to your Apple Account in the footer
+    Account Shopping Bag
+  `;
+
+  assert.equal(isLikelyAuthWall(publicProductText), false);
+  assert.equal(hasStrongAuthWallSignals({ visibleText: publicProductText }), false);
+});
+
+test("strong login, password, CAPTCHA, and verification pages trigger auth wall detection", () => {
+  assert.equal(isLikelyAuthWall("Please log in with your password to continue"), true);
+  assert.equal(isLikelyAuthWall("Complete this CAPTCHA to verify you are human"), true);
+  assert.equal(isLikelyAuthWall("Enter the verification code sent to your phone"), true);
+  assert.equal(hasStrongAuthWallSignals({ passwordFieldCount: 1 }), true);
+  assert.equal(hasStrongAuthWallSignals({ captchaCount: 1 }), true);
+  assert.equal(hasStrongAuthWallSignals({ verificationFieldCount: 1 }), true);
+});
+
+test("commerce policy allows exploration but blocks commitment actions", () => {
+  for (const label of ["Buy MacBook Air", "Shop Mac", "Compare", "Customize", "Choose", "Select", "Learn more"]) {
+    assert.equal(shouldSkipExternalAction(label), false, `${label} should be allowed`);
+  }
+
+  for (const label of ["Add to Bag", "Checkout", "Place Order", "Pay", "Confirm", "Subscribe", "Book", "Reserve", "Delete", "Logout"]) {
+    assert.equal(shouldSkipExternalAction(label), true, `${label} should be blocked`);
+    assert.equal(typeof commitmentStopReason(label), "string");
+  }
 });

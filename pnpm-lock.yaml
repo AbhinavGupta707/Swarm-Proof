@@ -14,6 +14,9 @@ importers:
 
   apps/browser-worker:
     dependencies:
+      '@swarmproof/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@swarmproof/types':
         specifier: workspace:*
         version: link:../../packages/types

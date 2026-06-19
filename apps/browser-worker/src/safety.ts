@@ -31,11 +31,65 @@ export function isCrossOriginNavigation(rawUrl: string, allowedOrigin: string) {
 }
 
 export function shouldSkipExternalAction(label: string) {
-  return /\b(delete|remove|destroy|logout|sign out|purchase|buy|checkout|pay|subscribe|confirm|book|reserve)\b/i.test(label);
+  return Boolean(commitmentStopReason(label));
+}
+
+export function commitmentStopReason(label: string) {
+  const normalized = label.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+
+  if (/\b(add to bag|add to cart|add bag|add cart)\b/i.test(normalized)) {
+    return "Adding an item to a cart or bag is a purchase-commitment boundary.";
+  }
+
+  if (/\b(checkout|place order|submit order|complete order|pay|payment|confirm|confirm purchase|confirm order)\b/i.test(normalized)) {
+    return "Checkout, payment, order, or confirmation actions are blocked.";
+  }
+
+  if (/\b(subscribe|start subscription|book|reserve|delete|remove|destroy|logout|log out|sign out)\b/i.test(normalized)) {
+    return "Subscription, booking, destructive, or account-exit actions are blocked.";
+  }
+
+  return undefined;
 }
 
 export function isLikelyAuthWall(text: string) {
-  return /\b(sign in|log in|login|password|captcha|verification code|two-factor|2fa|continue with google|payment required)\b/i.test(text);
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+
+  if (/\b(password|passcode)\b/i.test(normalized) && /\b(sign in|log in|login|authenticate|continue|account)\b/i.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(captcha|recaptcha|hcaptcha|turnstile|verify you are human)\b/i.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(verification code|two-factor|2fa|one-time code|security code|otp)\b/i.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(access denied|unauthorized|authentication required|login required|sign in required|members only|private page)\b/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function hasStrongAuthWallSignals(signals: {
+  visibleText?: string;
+  passwordFieldCount?: number;
+  captchaCount?: number;
+  verificationFieldCount?: number;
+  accessDeniedPanelCount?: number;
+}) {
+  return Boolean(
+    (signals.passwordFieldCount ?? 0) > 0 ||
+    (signals.captchaCount ?? 0) > 0 ||
+    (signals.verificationFieldCount ?? 0) > 0 ||
+    (signals.accessDeniedPanelCount ?? 0) > 0 ||
+    isLikelyAuthWall(signals.visibleText ?? "")
+  );
 }
 
 function isAllowedLocalAppUrl(parsed: URL, options: WorkerSafetyOptions) {

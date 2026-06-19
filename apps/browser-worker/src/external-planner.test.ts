@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { planExternalAction, type ExternalCandidate } from "./external-planner";
+import { planExternalAction, planExternalActionWithAi, type ExternalCandidate } from "./external-planner";
 
 test("external planner picks goal-matching same-origin candidates", () => {
   const candidates: ExternalCandidate[] = [
@@ -66,4 +66,72 @@ test("external planner allows search fill but blocks unsafe form fields without 
   assert.equal(emailPlan.type, "fill");
   if (emailPlan.type !== "fill") throw new Error("Expected owner-confirmed email fill");
   assert.equal(emailPlan.value, "teammate@example.com");
+});
+
+test("external planner allows safe commerce exploration", () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "link", label: "Mac accessories", href: "https://www.apple.com/shop/accessories", sameOrigin: true, ordinal: 0 },
+    { kind: "link", label: "Buy MacBook Air", href: "https://www.apple.com/shop/buy-mac/macbook-air", sameOrigin: true, ordinal: 1 },
+    { kind: "button", label: "Customize", ordinal: 2 }
+  ];
+
+  const buyPlan = planExternalAction({
+    goal: "I want to buy a MacBook Air and understand configuration choices.",
+    personaMode: "normal",
+    candidates
+  });
+  assert.equal(buyPlan.type, "click");
+  if (buyPlan.type !== "click") throw new Error("Expected buy click plan");
+  assert.equal(buyPlan.candidate.label, "Buy MacBook Air");
+
+  const customizePlan = planExternalAction({
+    goal: "Customize the MacBook Air configuration.",
+    personaMode: "normal",
+    candidates: [candidates[2]]
+  });
+  assert.equal(customizePlan.type, "click");
+  if (customizePlan.type !== "click") throw new Error("Expected customize click plan");
+  assert.equal(customizePlan.candidate.label, "Customize");
+});
+
+test("external planner blocks unsafe commerce commitment actions", () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "button", label: "Add to Bag", ordinal: 0 },
+    { kind: "link", label: "Checkout", href: "https://www.apple.com/shop/checkout", sameOrigin: true, ordinal: 1 },
+    { kind: "button", label: "Place Order", ordinal: 2 },
+    { kind: "button", label: "Pay", ordinal: 3 }
+  ];
+
+  const plan = planExternalAction({
+    goal: "Buy a MacBook Air.",
+    personaMode: "normal",
+    candidates
+  });
+
+  assert.equal(plan.type, "none");
+});
+
+test("invalid AI planner output falls back to the safe deterministic planner", async () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "link", label: "Buy MacBook Air", href: "https://www.apple.com/shop/buy-mac/macbook-air", sameOrigin: true, ordinal: 0 },
+    { kind: "button", label: "Add to Bag", ordinal: 1 }
+  ];
+  const invalidPlanner = {
+    async generateJson<T>() {
+      return { action: "choose_candidate", ordinal: 1, reason: "Add it to the bag." } as T;
+    }
+  };
+
+  const plan = await planExternalActionWithAi({
+    goal: "Buy a MacBook Air and inspect configuration choices.",
+    personaMode: "normal",
+    candidates,
+    page: { url: "https://www.apple.com/macbook-air/", title: "MacBook Air" },
+    history: [],
+    aiProvider: invalidPlanner
+  });
+
+  assert.equal(plan.type, "click");
+  if (plan.type !== "click") throw new Error("Expected deterministic fallback click");
+  assert.equal(plan.candidate.label, "Buy MacBook Air");
 });
