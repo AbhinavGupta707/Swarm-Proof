@@ -1,6 +1,7 @@
 "use client";
 
 import { Download } from "lucide-react";
+import { Events, trackEvent } from "@swarmproof/events";
 
 export function BugReportDownloadLink({
   href,
@@ -21,7 +22,7 @@ export function BugReportDownloadLink({
       href={href}
       download="swarmproof-bug-report.md"
       onClick={() => {
-        window.pendo?.track?.("bug_report_downloaded", {
+        trackEvent(Events.BugReportDownloaded, {
           target_kind: targetKind,
           issue_count: issueCount,
           score,

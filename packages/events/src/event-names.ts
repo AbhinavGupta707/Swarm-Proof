@@ -11,6 +11,7 @@ export const Events = {
   ReportGenerated: "report_generated",
   ReplayOpened: "replay_opened",
   TestExported: "test_exported",
+  BugReportDownloaded: "bug_report_downloaded",
   ShareCreated: "share_created"
 } as const;
 
