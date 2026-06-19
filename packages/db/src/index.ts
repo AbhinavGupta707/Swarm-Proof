@@ -70,6 +70,10 @@ type AuditSnapshot = {
   events: AuditEventSummary[];
   savedAt: string;
 };
+type PersistedSnapshot = { snapshot?: AuditSnapshot; updatedAt?: string | null };
+type PersistenceBackend = "memory" | "postgres" | "supabase-rest";
+type SupabaseRestConfig = { url: string; serviceRoleKey: string };
+type SupabaseRestInit = { method?: string; headers?: Record<string, string>; body?: string };
 
 declare global {
   var __swarmproofStore: Store | undefined;
@@ -79,17 +83,21 @@ declare global {
 
 const UNSAFE_EVENT_KEYS = ["url", "content", "screenshot", "secret", "token", "password", "email", "credential"];
 const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED"];
+const SUPABASE_REST_MUTATION_RETRIES = 5;
 
 export function getDatabaseStatus() {
-  const dbBacked = shouldUsePostgresPersistence();
+  const activeAdapter = getPersistenceBackend();
+  const dbBacked = activeAdapter !== "memory";
   return {
     configured: Boolean(process.env.DATABASE_URL),
     provider: getActiveProvider(),
-    activeAdapter: dbBacked ? "postgres" : "memory",
+    activeAdapter,
     dbBacked,
     prismaReady: true,
-    note: dbBacked
+    note: activeAdapter === "postgres"
       ? "DATABASE_URL is configured; using the Postgres audit snapshot adapter with memory fallback for local tests."
+      : activeAdapter === "supabase-rest"
+        ? "DATABASE_URL and Supabase service credentials are configured; using the Supabase REST audit snapshot adapter."
       : "DATABASE_URL is absent; using deterministic memory fallback."
   };
 }
@@ -169,7 +177,7 @@ export async function createShareAsync(auditId: string, baseUrl: string) {
 }
 
 export async function getSharedReportAsync(shareToken: string) {
-  if (!shouldUsePostgresPersistence()) {
+  if (!shouldUseDurablePersistence()) {
     return getSharedReport(shareToken);
   }
 
@@ -193,7 +201,7 @@ export async function completeWorkerRunAsync(input: WorkerCompleteCallback) {
 }
 
 async function readPersistedAudit<T>(auditId: string, operation: () => T): Promise<T> {
-  if (!shouldUsePostgresPersistence()) {
+  if (!shouldUseDurablePersistence()) {
     return operation();
   }
 
@@ -207,8 +215,13 @@ async function readPersistedAudit<T>(auditId: string, operation: () => T): Promi
 }
 
 async function mutatePersistedAudit<T>(auditId: string, operation: () => T): Promise<T> {
-  if (!shouldUsePostgresPersistence()) {
+  const backend = getPersistenceBackend();
+  if (backend === "memory") {
     return operation();
+  }
+
+  if (backend === "supabase-rest") {
+    return mutateSupabaseSnapshot(auditId, operation);
   }
 
   await ensurePostgresPersistence();
@@ -224,7 +237,7 @@ async function mutatePersistedAudit<T>(auditId: string, operation: () => T): Pro
     restoreSnapshot(snapshot);
 
     const result = operation();
-    await writeSnapshot(client, auditId);
+    await writeSnapshotToPostgres(client, auditId);
     await client.query("COMMIT");
     return result;
   } catch (error) {
@@ -236,7 +249,13 @@ async function mutatePersistedAudit<T>(auditId: string, operation: () => T): Pro
 }
 
 async function saveAuditSnapshot(auditId: string) {
-  if (!shouldUsePostgresPersistence()) {
+  const backend = getPersistenceBackend();
+  if (backend === "memory") {
+    return;
+  }
+
+  if (backend === "supabase-rest") {
+    await writeSnapshot(auditId);
     return;
   }
 
@@ -245,7 +264,7 @@ async function saveAuditSnapshot(auditId: string) {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [auditId]);
-    await writeSnapshot(client, auditId);
+    await writeSnapshotToPostgres(client, auditId);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -256,8 +275,13 @@ async function saveAuditSnapshot(auditId: string) {
 }
 
 async function readSnapshotByAuditId(auditId: string, client?: PoolClient): Promise<AuditSnapshot | undefined> {
-  if (!shouldUsePostgresPersistence()) {
+  const backend = getPersistenceBackend();
+  if (backend === "memory") {
     return undefined;
+  }
+
+  if (backend === "supabase-rest") {
+    return (await readSupabaseSnapshotByAuditId(auditId)).snapshot;
   }
 
   await ensurePostgresPersistence();
@@ -269,7 +293,64 @@ async function readSnapshotByAuditId(auditId: string, client?: PoolClient): Prom
   return parseSnapshot(result.rows[0]?.data);
 }
 
+async function mutateSupabaseSnapshot<T>(auditId: string, operation: () => T): Promise<T> {
+  for (let attempt = 0; attempt < SUPABASE_REST_MUTATION_RETRIES; attempt += 1) {
+    const persisted = await readSupabaseSnapshotByAuditId(auditId);
+    if (!persisted.snapshot) {
+      throw new Error("Audit not found.");
+    }
+
+    restoreSnapshot(persisted.snapshot);
+    const result = operation();
+    const saved = await patchSupabaseSnapshot(auditId, persisted.updatedAt);
+    if (saved) {
+      return result;
+    }
+
+    await delay(30 * (attempt + 1));
+  }
+
+  throw new Error("Audit update conflicted too many times. Please retry the audit action.");
+}
+
+async function readSupabaseSnapshotByAuditId(auditId: string): Promise<PersistedSnapshot> {
+  const rows = await supabaseRest<Array<{ data: AuditSnapshot | string; updated_at: string | null }>>(
+    `/swarmproof_audit_snapshots?id=eq.${encodeURIComponent(auditId)}&select=data,updated_at&limit=1`
+  );
+  const row = rows[0];
+  return {
+    snapshot: parseSnapshot(row?.data),
+    updatedAt: row?.updated_at ?? null
+  };
+}
+
+async function patchSupabaseSnapshot(auditId: string, expectedUpdatedAt?: string | null) {
+  const { audit, snapshot } = buildSnapshot(auditId);
+  const updatedAtFilter = expectedUpdatedAt ? `&updated_at=eq.${encodeURIComponent(expectedUpdatedAt)}` : "";
+  const rows = await supabaseRest<Array<{ id: string }>>(
+    `/swarmproof_audit_snapshots?id=eq.${encodeURIComponent(auditId)}${updatedAtFilter}&select=id`,
+    {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        share_token: audit.shareToken ?? null,
+        data: snapshot,
+        updated_at: new Date().toISOString()
+      })
+    }
+  );
+
+  return rows.length === 1;
+}
+
 async function readSnapshotByShareToken(shareToken: string): Promise<AuditSnapshot | undefined> {
+  if (getPersistenceBackend() === "supabase-rest") {
+    const rows = await supabaseRest<Array<{ data: AuditSnapshot | string }>>(
+      `/swarmproof_audit_snapshots?share_token=eq.${encodeURIComponent(shareToken)}&select=data&limit=1`
+    );
+    return parseSnapshot(rows[0]?.data);
+  }
+
   await ensurePostgresPersistence();
   const result = await getPostgresPool().query<{ data: AuditSnapshot | string }>(
     "SELECT data FROM swarmproof_audit_snapshots WHERE share_token = $1 LIMIT 1",
@@ -279,9 +360,21 @@ async function readSnapshotByShareToken(shareToken: string): Promise<AuditSnapsh
 }
 
 async function findPersistedAuditIdForRun(runId: string): Promise<string> {
-  if (!shouldUsePostgresPersistence()) {
+  const backend = getPersistenceBackend();
+  if (backend === "memory") {
     const match = [...getStore().audits.values()].find((audit) => audit.runs.some((run) => run.id === runId));
     if (!match) throw new Error("Run not found.");
+    return match.id;
+  }
+
+  if (backend === "supabase-rest") {
+    const rows = await supabaseRest<Array<{ id: string; data: AuditSnapshot | string }>>(
+      "/swarmproof_audit_snapshots?select=id,data&order=updated_at.desc&limit=50"
+    );
+    const match = rows.find((row) => parseSnapshot(row.data)?.audit.runs.some((run) => run.id === runId));
+    if (!match) {
+      throw new Error("Run not found.");
+    }
     return match.id;
   }
 
@@ -297,7 +390,44 @@ async function findPersistedAuditIdForRun(runId: string): Promise<string> {
   return auditId;
 }
 
-async function writeSnapshot(client: PoolClient, auditId: string) {
+async function writeSnapshot(auditId: string) {
+  if (getPersistenceBackend() === "postgres") {
+    const client = await getPostgresPool().connect();
+    try {
+      await writeSnapshotToPostgres(client, auditId);
+      return;
+    } finally {
+      client.release();
+    }
+  }
+
+  const { audit, snapshot } = buildSnapshot(auditId);
+  await supabaseRest("/swarmproof_audit_snapshots?on_conflict=id", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({
+      id: audit.id,
+      share_token: audit.shareToken ?? null,
+      data: snapshot,
+      updated_at: new Date().toISOString()
+    })
+  });
+}
+
+async function writeSnapshotToPostgres(client: PoolClient, auditId: string) {
+  const { audit, snapshot } = buildSnapshot(auditId);
+  await client.query(
+    `INSERT INTO swarmproof_audit_snapshots (id, share_token, data, updated_at)
+     VALUES ($1, $2, $3::jsonb, now())
+     ON CONFLICT (id) DO UPDATE SET
+       share_token = EXCLUDED.share_token,
+       data = EXCLUDED.data,
+       updated_at = now()`,
+    [audit.id, audit.shareToken ?? null, JSON.stringify(snapshot)]
+  );
+}
+
+function buildSnapshot(auditId: string) {
   const audit = getStore().audits.get(auditId);
   if (!audit) {
     throw new Error("Audit not found.");
@@ -310,15 +440,7 @@ async function writeSnapshot(client: PoolClient, auditId: string) {
     savedAt: new Date().toISOString()
   };
 
-  await client.query(
-    `INSERT INTO swarmproof_audit_snapshots (id, share_token, data, updated_at)
-     VALUES ($1, $2, $3::jsonb, now())
-     ON CONFLICT (id) DO UPDATE SET
-       share_token = EXCLUDED.share_token,
-       data = EXCLUDED.data,
-       updated_at = now()`,
-    [audit.id, audit.shareToken ?? null, JSON.stringify(snapshot)]
-  );
+  return { audit, snapshot };
 }
 
 function parseSnapshot(value: AuditSnapshot | string | undefined): AuditSnapshot | undefined {
@@ -380,7 +502,73 @@ function getPostgresPool() {
 }
 
 function shouldUsePostgresPersistence() {
-  return Boolean(process.env.DATABASE_URL) && process.env.SWARMPROOF_PERSISTENCE !== "memory";
+  return getPersistenceBackend() === "postgres";
+}
+
+function shouldUseDurablePersistence() {
+  return getPersistenceBackend() !== "memory";
+}
+
+function getPersistenceBackend(): PersistenceBackend {
+  const override = process.env.SWARMPROOF_PERSISTENCE;
+  if (override === "memory") {
+    return "memory";
+  }
+
+  if (!process.env.DATABASE_URL) {
+    return "memory";
+  }
+
+  if (override === "postgres" || override === "supabase-rest") {
+    return override;
+  }
+
+  return getSupabaseRestConfig() ? "supabase-rest" : "postgres";
+}
+
+function getSupabaseRestConfig(): SupabaseRestConfig | undefined {
+  const rawUrl = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!rawUrl || !serviceRoleKey) {
+    return undefined;
+  }
+
+  return { url: rawUrl.replace(/\/+$/, ""), serviceRoleKey };
+}
+
+async function supabaseRest<T>(path: string, init: SupabaseRestInit = {}): Promise<T> {
+  const config = getSupabaseRestConfig();
+  if (!config) {
+    throw new Error("Supabase REST persistence requires NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL plus SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  const response = await fetch(`${config.url}/rest/v1${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      apikey: config.serviceRoleKey,
+      authorization: `Bearer ${config.serviceRoleKey}`,
+      "content-type": "application/json",
+      ...init.headers
+    },
+    body: init.body,
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`Supabase REST persistence failed with ${response.status}: ${message.slice(0, 300)}`);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function shouldUseDatabaseSsl(databaseUrl: string) {

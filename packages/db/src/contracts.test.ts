@@ -17,6 +17,7 @@ import {
   getAuditOverviewAsync,
   getAuditOverview,
   getDatabaseStatus,
+  getPersistenceConfig,
   getSharedReportAsync,
   getSharedReport,
   preflightTargetUrl,
@@ -358,3 +359,51 @@ test("share, database status, and artifact status expose persistence-ready contr
   assert.equal(getDatabaseStatus().activeAdapter, "memory");
   assert.equal(getArtifactStorageStatus().localFallback, true);
 });
+
+test("persistence config selects memory, postgres, and Supabase REST adapters", () => {
+  const previous = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    SWARMPROOF_PERSISTENCE: process.env.SWARMPROOF_PERSISTENCE,
+    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY
+  };
+
+  try {
+    delete process.env.DATABASE_URL;
+    delete process.env.SWARMPROOF_PERSISTENCE;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    assert.equal(getPersistenceConfig().mode, "memory");
+    assert.equal(getDatabaseStatus().activeAdapter, "memory");
+
+    process.env.DATABASE_URL = "postgresql://swarmproof:secret@db.example.com:5432/postgres";
+    assert.equal(getPersistenceConfig().mode, "postgres");
+    assert.equal(getDatabaseStatus().activeAdapter, "postgres");
+
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
+    assert.equal(getPersistenceConfig().mode, "supabase-rest");
+    assert.equal(getDatabaseStatus().activeAdapter, "supabase-rest");
+
+    process.env.SWARMPROOF_PERSISTENCE = "postgres";
+    assert.equal(getPersistenceConfig().mode, "postgres");
+    assert.equal(getDatabaseStatus().activeAdapter, "postgres");
+  } finally {
+    restoreEnvValue("DATABASE_URL", previous.DATABASE_URL);
+    restoreEnvValue("SWARMPROOF_PERSISTENCE", previous.SWARMPROOF_PERSISTENCE);
+    restoreEnvValue("NEXT_PUBLIC_SUPABASE_URL", previous.NEXT_PUBLIC_SUPABASE_URL);
+    restoreEnvValue("SUPABASE_URL", previous.SUPABASE_URL);
+    restoreEnvValue("SUPABASE_SERVICE_ROLE_KEY", previous.SUPABASE_SERVICE_ROLE_KEY);
+  }
+});
+
+function restoreEnvValue(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
