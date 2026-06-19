@@ -31,6 +31,7 @@ type EvidenceStats = {
   succeededRunCount: number;
   failedRunCount: number;
   blockedRunCount: number;
+  timedOutRunCount: number;
   stepCount: number;
   issueCount: number;
   artifactCount: number;
@@ -82,8 +83,12 @@ declare global {
 }
 
 const UNSAFE_EVENT_KEYS = ["url", "content", "screenshot", "secret", "token", "password", "email", "credential"];
-const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED"];
+const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED", "TIMED_OUT"];
 const SUPABASE_REST_MUTATION_RETRIES = 5;
+const DEFAULT_PERSONA_TIMEOUT_MS = 75_000;
+const DEFAULT_AUDIT_TIMEOUT_MS = 210_000;
+const EVENTS_RESPONSE_LIMIT = 100;
+const RUN_STEP_RESPONSE_LIMIT = 10;
 
 export function getDatabaseStatus() {
   const activeAdapter = getPersistenceBackend();
@@ -161,15 +166,19 @@ export async function blockWorkerAuditRunAsync(auditId: string, reason: string) 
 }
 
 export async function getAuditOverviewAsync(auditId: string) {
-  return readPersistedAudit(auditId, () => getAuditOverview(auditId));
+  return readAuditWithWatchdog(auditId, () => getAuditOverview(auditId));
 }
 
 export async function getAuditEventsAsync(auditId: string) {
-  return readPersistedAudit(auditId, () => getAuditEvents(auditId));
+  return readAuditWithWatchdog(auditId, () => getAuditEvents(auditId));
 }
 
 export async function generateAuditReportAsync(auditId: string) {
   return mutatePersistedAudit(auditId, () => generateAuditReport(auditId));
+}
+
+export async function finalizeTimedOutAuditAsync(auditId: string, options: TimeoutFinalizationOptions = {}) {
+  return mutatePersistedAudit(auditId, () => finalizeTimedOutAudit(auditId, options));
 }
 
 export async function createShareAsync(auditId: string, baseUrl: string) {
@@ -199,6 +208,12 @@ export async function completeWorkerRunAsync(input: WorkerCompleteCallback) {
   const auditId = input.auditId ?? await findPersistedAuditIdForRun(input.runId);
   return mutatePersistedAudit(auditId, () => completeWorkerRun(input));
 }
+
+type TimeoutFinalizationOptions = {
+  now?: Date | string;
+  personaTimeoutMs?: number;
+  auditTimeoutMs?: number;
+};
 
 async function readPersistedAudit<T>(auditId: string, operation: () => T): Promise<T> {
   if (!shouldUseDurablePersistence()) {
@@ -238,6 +253,70 @@ async function mutatePersistedAudit<T>(auditId: string, operation: () => T): Pro
 
     const result = operation();
     await writeSnapshotToPostgres(client, auditId);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readAuditWithWatchdog<T>(auditId: string, operation: () => T): Promise<T> {
+  const backend = getPersistenceBackend();
+  if (backend === "memory") {
+    return operation();
+  }
+
+  if (backend === "supabase-rest") {
+    for (let attempt = 0; attempt < SUPABASE_REST_MUTATION_RETRIES; attempt += 1) {
+      const persisted = await readSupabaseSnapshotByAuditId(auditId);
+      if (!persisted.snapshot) {
+        throw new Error("Audit not found.");
+      }
+
+      restoreSnapshot(persisted.snapshot);
+      const changed = finalizeTimedOutAuditRecord(requireAudit(auditId));
+      if (changed) {
+        generateAuditReport(auditId);
+      }
+      const result = operation();
+      if (!changed) {
+        return result;
+      }
+
+      const saved = await patchSupabaseSnapshot(auditId, persisted.updatedAt);
+      if (saved) {
+        return result;
+      }
+
+      await delay(30 * (attempt + 1));
+    }
+
+    throw new Error("Audit update conflicted too many times. Please retry the audit action.");
+  }
+
+  await ensurePostgresPersistence();
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [auditId]);
+
+    const snapshot = await readSnapshotByAuditId(auditId, client);
+    if (!snapshot) {
+      throw new Error("Audit not found.");
+    }
+    restoreSnapshot(snapshot);
+
+    const changed = finalizeTimedOutAuditRecord(requireAudit(auditId));
+    if (changed) {
+      generateAuditReport(auditId);
+    }
+    const result = operation();
+    if (changed) {
+      await writeSnapshotToPostgres(client, auditId);
+    }
     await client.query("COMMIT");
     return result;
   } catch (error) {
@@ -766,6 +845,7 @@ export function startWorkerAuditRun(auditId: string, callbackBaseUrl: string) {
       goal: audit.goal,
       persona: personaForMode(run.mode as PersonaMode),
       maxSteps: audit.maxSteps,
+      timeoutMs: personaTimeoutMs(),
       callbackBaseUrl,
       runMode: audit.preflight.isDemoTarget ? "demo-target" : "external-public",
       allowExternalFormSubmissions: audit.preflight.isDemoTarget
@@ -814,21 +894,35 @@ export function getAudit(auditId: string) {
 }
 
 export function getAuditOverview(auditId: string) {
-  return toSummary(requireAudit(auditId));
+  const audit = requireAudit(auditId);
+  if (finalizeTimedOutAuditRecord(audit)) {
+    generateAuditReport(audit.id);
+  }
+  return toSummary(audit);
 }
 
 export function getAuditEvents(auditId: string) {
   const audit = requireAudit(auditId);
+  if (finalizeTimedOutAuditRecord(audit)) {
+    generateAuditReport(audit.id);
+  }
   const runSteps = audit.runs.flatMap((run) => run.steps ?? []);
   const events = getStore().events.filter((event) => event.auditId === audit.id);
+  const recentSteps = runSteps.slice(-EVENTS_RESPONSE_LIMIT);
+  const recentEvents = events.slice(-EVENTS_RESPONSE_LIMIT);
   return {
-    events,
-    steps: runSteps,
-    runs: audit.runs,
+    events: recentEvents,
+    eventCount: events.length,
+    steps: recentSteps,
+    runs: audit.runs.map((run) => ({
+      ...run,
+      steps: (run.steps ?? []).slice(-RUN_STEP_RESPONSE_LIMIT),
+      artifacts: (run.artifacts ?? []).slice(-RUN_STEP_RESPONSE_LIMIT)
+    })),
     status: audit.status,
     issueCount: audit.issues.length,
     issues: audit.issues,
-    artifacts: audit.artifacts,
+    artifacts: audit.artifacts.slice(-EVENTS_RESPONSE_LIMIT),
     jobs: audit.jobs,
     provider: audit.provider,
     maxSteps: audit.maxSteps,
@@ -840,10 +934,13 @@ export function getAuditEvents(auditId: string) {
 
 export function generateAuditReport(auditId: string) {
   const audit = requireAudit(auditId);
+  finalizeTimedOutAuditRecord(audit);
   const generatedTest = buildGeneratedTest(audit);
+  const hasPartialRun = audit.runs.some((run) => FINAL_RUN_STATUSES.includes(run.status) && run.status !== "SUCCEEDED");
+  const hasUnfinishedRun = audit.runs.some((run) => !FINAL_RUN_STATUSES.includes(run.status));
   const outcome: AuditOutcomeValue = audit.issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
     ? "fail"
-    : audit.issues.length > 0
+    : audit.issues.length > 0 || hasPartialRun || hasUnfinishedRun
       ? "partial"
       : "pass";
   const score = calculateScore(audit);
@@ -969,6 +1066,26 @@ export function appendEvent(name: string, auditId: string | undefined, props: Re
 
 export function recordWorkerStep(input: WorkerStepCallback) {
   const { audit, run } = requireRun(input.runId);
+  const existingStep = (run.steps ?? []).find((step) => step.stepIndex === input.stepIndex);
+  if (existingStep) {
+    markJobRunningForRun(audit, run);
+    return existingStep;
+  }
+
+  if (FINAL_RUN_STATUSES.includes(run.status)) {
+    return {
+      id: `${run.id}:ignored:${input.stepIndex}`,
+      runId: run.id,
+      stepIndex: input.stepIndex,
+      action: input.action,
+      status: input.status ?? "warning",
+      thought: input.thought,
+      result: "Ignored late worker callback because this persona run is already finalized.",
+      url: input.url,
+      createdAt: new Date().toISOString()
+    } satisfies BrowserStepSummary;
+  }
+
   const screenshotUrl = input.screenshotUrl ?? (input.screenshotBase64 ? `data:image/png;base64,${input.screenshotBase64}` : undefined);
   const artifact = screenshotUrl
     ? createArtifact(audit, {
@@ -998,6 +1115,10 @@ export function recordWorkerStep(input: WorkerStepCallback) {
 
 export function completeWorkerRun(input: WorkerCompleteCallback) {
   const { audit, run } = requireRun(input.runId);
+  if (FINAL_RUN_STATUSES.includes(run.status)) {
+    return toSummary(audit);
+  }
+
   run.status = input.status ?? (input.success ? "SUCCEEDED" : "FAILED");
   run.success = input.success;
   run.summary = input.summary;
@@ -1024,9 +1145,10 @@ export function completeWorkerRun(input: WorkerCompleteCallback) {
     });
   }
 
-  appendEvent(input.success ? "run_completed" : "persona_blocked", audit.id, {
+  appendEvent(eventNameForRunStatus(run.status), audit.id, {
     persona: run.mode,
     success: input.success,
+    status: run.status,
     issueCount: input.issues?.length ?? 0
   });
   completeAuditIfReady(audit);
@@ -1228,6 +1350,10 @@ function buildReportSummary(audit: AuditRecord) {
   }
 
   if (!audit.preflight.isDemoTarget) {
+    if (stats.timedOutRunCount > 0) {
+      return `Partial report ready: ${pluralize(stats.timedOutRunCount, "persona")} timed out, but SwarmProof preserved ${pluralize(stats.stepCount, "evidence step")} and finalized the audit cleanly.`;
+    }
+
     if (audit.issues.some((issue) => issue.category === "Execution setup")) {
       return `The target passed safety checks, but browser execution did not complete beyond ${pluralize(stats.stepCount, "evidence step")}.`;
     }
@@ -1323,6 +1449,7 @@ function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
     succeededRunCount: audit.runs.filter((run) => run.status === "SUCCEEDED").length,
     failedRunCount: audit.runs.filter((run) => run.status === "FAILED").length,
     blockedRunCount: audit.runs.filter((run) => run.status === "BLOCKED").length,
+    timedOutRunCount: audit.runs.filter((run) => run.status === "TIMED_OUT").length,
     stepCount: stepEvidence.length,
     issueCount: audit.issues.length,
     artifactCount: audit.artifacts.length,
@@ -1335,6 +1462,9 @@ function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
 
 function findingClause(stats: EvidenceStats) {
   if (!stats.issueCount) {
+    if (stats.timedOutRunCount > 0) {
+      return `timed out for ${stats.timedOutRunCount} of ${stats.runCount || 0} personas but preserved partial evidence`;
+    }
     return `did not find a blocking issue; ${stats.succeededRunCount} of ${stats.runCount || 0} personas completed cleanly`;
   }
 
@@ -1346,6 +1476,8 @@ function externalStopReason(audit: AuditRecord) {
   const runHadBlocker = audit.runs.some((run) => run.status !== "SUCCEEDED");
   const issue = audit.issues.find((candidate) => candidate.category === "Auth-limited flow")
     ?? audit.issues.find((candidate) => candidate.category === "Safety stop")
+    ?? audit.issues.find((candidate) => candidate.category === "Execution timeout")
+    ?? audit.issues.find((candidate) => candidate.category === "Worker crash")
     ?? audit.issues.find((candidate) => candidate.category === "Agent uncertainty")
     ?? audit.issues.find((candidate) => ["Execution", "Execution setup"].includes(candidate.category))
     ?? audit.issues.find((candidate) => ["Console", "Network"].includes(candidate.category) && runHadBlocker)
@@ -1363,11 +1495,19 @@ function externalStopReason(audit: AuditRecord) {
     return `Safety stop: SwarmProof safely explored ${pluralize(stats.stepCount, "evidence step")} and stopped before cart, checkout, payment, private data, or another irreversible commitment.`;
   }
 
+  if (issue.category === "Execution timeout") {
+    return `Partial report ready: SwarmProof timed out ${pluralize(stats.timedOutRunCount, "persona")} and preserved ${pluralize(stats.stepCount, "evidence step")} instead of leaving the audit running.`;
+  }
+
+  if (issue.category === "Worker crash") {
+    return `Worker crash: SwarmProof preserved partial evidence and finalized the audit after the browser worker crashed or disconnected.`;
+  }
+
   if (issue.category === "Agent uncertainty") {
     return `Agent uncertainty: SwarmProof loaded the public target but could not identify a safe, goal-relevant next step from the visible page evidence.`;
   }
 
-  if (["Execution", "Execution setup"].includes(issue.category) || (["Console", "Network"].includes(issue.category) && runHadBlocker)) {
+  if (["Execution", "Execution setup", "Execution timeout", "Worker crash"].includes(issue.category) || (["Console", "Network"].includes(issue.category) && runHadBlocker)) {
     return `Technical failure: SwarmProof reached the target but browser execution, console, network, or worker setup issues limited the audit.`;
   }
 
@@ -1573,7 +1713,7 @@ function userImpactForIssue(issue: AuditIssueSummary) {
     return "A first-time user may not see a clear safe next action for the stated goal.";
   }
 
-  if (["Execution", "Execution setup", "Console", "Network"].includes(issue.category)) {
+  if (["Execution", "Execution setup", "Execution timeout", "Worker crash", "Console", "Network"].includes(issue.category)) {
     return "The audit evidence is limited by a technical blocker that should be checked before trusting the flow.";
   }
 
@@ -1587,6 +1727,8 @@ function likelyAreaForIssue(issue: AuditIssueSummary) {
   if (issue.category === "Console") return "Frontend runtime";
   if (issue.category === "Network") return "Network/API or asset loading";
   if (issue.category === "Execution setup") return "SwarmProof worker configuration";
+  if (issue.category === "Execution timeout") return "SwarmProof worker timeout and callback delivery";
+  if (issue.category === "Worker crash") return "SwarmProof browser worker runtime";
   return issue.category;
 }
 
@@ -1610,6 +1752,85 @@ function calculateScore(audit: AuditRecord) {
     return total + 6;
   }, 0);
   return Math.max(15, 100 - penalty);
+}
+
+export function finalizeTimedOutAudit(auditId: string, options: TimeoutFinalizationOptions = {}) {
+  const audit = requireAudit(auditId);
+  if (finalizeTimedOutAuditRecord(audit, options)) {
+    generateAuditReport(audit.id);
+  }
+  return toSummary(audit);
+}
+
+function finalizeTimedOutAuditRecord(audit: AuditRecord, options: TimeoutFinalizationOptions = {}) {
+  if (audit.status !== "RUNNING" || audit.runs.length === 0) {
+    return false;
+  }
+
+  const now = toDate(options.now) ?? new Date();
+  const personaBudget = options.personaTimeoutMs ?? personaTimeoutMs();
+  const auditBudget = options.auditTimeoutMs ?? auditTimeoutMs(audit.runs.length);
+  const auditStartedAt = earliestRunStart(audit) ?? toDate(audit.createdAt) ?? toDate(audit.updatedAt) ?? now;
+  const auditTimedOut = now.getTime() - auditStartedAt.getTime() >= auditBudget;
+  let changed = false;
+
+  for (const run of audit.runs) {
+    if (FINAL_RUN_STATUSES.includes(run.status)) {
+      continue;
+    }
+
+    const runStartedAt = toDate(run.startedAt) ?? auditStartedAt;
+    const personaTimedOut = now.getTime() - runStartedAt.getTime() >= personaBudget;
+    if (!auditTimedOut && !personaTimedOut) {
+      continue;
+    }
+
+    const stepIds = run.steps?.map((step) => step.id) ?? [];
+    if (stepIds.length === 0) {
+      const step = addStep(run, {
+        stepIndex: 1,
+        action: "timeout_watchdog",
+        status: "failed",
+        thought: "Finalize a live worker run that did not send a terminal callback.",
+        result: auditTimedOut
+          ? "Audit-level timeout elapsed before this persona produced a final callback."
+          : "Persona-level timeout elapsed before the worker produced a final callback.",
+        url: audit.normalizedUrl ?? audit.targetUrl
+      });
+      stepIds.push(step.id);
+    }
+
+    run.status = "TIMED_OUT";
+    run.success = false;
+    run.summary = auditTimedOut
+      ? "Audit watchdog timed out before the browser worker finished this persona. Partial evidence is available."
+      : "Persona watchdog timed out before the browser worker finished this run. Partial evidence is available.";
+    run.finishedAt = now.toISOString();
+    finishJobForRun(audit, run);
+    addIssue(audit, {
+      severity: "MEDIUM",
+      category: "Execution timeout",
+      title: "Browser worker timed out before finishing",
+      description: auditTimedOut
+        ? "The audit-level watchdog settled this persona so the run could produce a partial report instead of staying RUNNING."
+        : "The persona-level watchdog settled this run so the audit could produce a partial report instead of staying RUNNING.",
+      evidenceStepIds: stepIds,
+      suggestedFix: "Retry the persona after checking worker health, target page weight, and callback delivery."
+    });
+    appendEvent("persona_timed_out", audit.id, {
+      persona: run.mode,
+      auditTimedOut,
+      stepCount: stepIds.length
+    });
+    changed = true;
+  }
+
+  if (changed) {
+    completeAuditIfReady(audit);
+    touch(audit);
+  }
+
+  return changed;
 }
 
 function completeAuditIfReady(audit: AuditRecord) {
@@ -1648,6 +1869,13 @@ function toSummary(audit: AuditRecord): AuditSummary {
   };
 }
 
+function eventNameForRunStatus(status: RunStatus) {
+  if (status === "SUCCEEDED") return "run_completed";
+  if (status === "TIMED_OUT") return "persona_timed_out";
+  if (status === "FAILED") return "persona_failed";
+  return "persona_blocked";
+}
+
 function requireAudit(auditId: string) {
   const audit = getAudit(auditId);
   if (!audit) {
@@ -1672,6 +1900,38 @@ function touch(audit: AuditRecord) {
   audit.updatedAt = new Date().toISOString();
 }
 
+function personaTimeoutMs() {
+  return positiveEnvNumber("SWARMPROOF_PERSONA_TIMEOUT_MS", DEFAULT_PERSONA_TIMEOUT_MS);
+}
+
+function auditTimeoutMs(runCount: number) {
+  const defaultBudget = Math.max(DEFAULT_AUDIT_TIMEOUT_MS, personaTimeoutMs() * Math.max(runCount, 1) + 30_000);
+  return positiveEnvNumber("SWARMPROOF_AUDIT_TIMEOUT_MS", defaultBudget);
+}
+
+function positiveEnvNumber(key: string, fallback: number) {
+  const parsed = Number(process.env[key]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function earliestRunStart(audit: AuditRecord) {
+  const starts = audit.runs
+    .map((run) => toDate(run.startedAt))
+    .filter((value): value is Date => Boolean(value))
+    .sort((left, right) => left.getTime() - right.getTime());
+  return starts[0];
+}
+
+function toDate(value: Date | string | undefined) {
+  if (!value) return undefined;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? undefined : value;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 function normalizeModes(modes?: string[]): PersonaMode[] {
   const requested = (modes?.length ? modes : ["normal", "mobile", "chaos"])
     .map((mode) => mode.replace("-", "_"))
@@ -1688,6 +1948,8 @@ function createJob(audit: AuditRecord, runId?: string, status: AuditJobSummary["
     status,
     provider: audit.provider,
     attempts: 1,
+    retryCount: 0,
+    queuedAt: now,
     createdAt: now,
     updatedAt: now
   };
@@ -1700,20 +1962,35 @@ function finishJobForRun(audit: AuditRecord, run: AuditRunSummary) {
   const job = audit.jobs.find((candidate) => candidate.runId === run.id);
   if (!job) return;
 
-  job.status = run.status === "SUCCEEDED" ? "SUCCEEDED" : run.status === "FAILED" || run.status === "BLOCKED" ? "FAILED" : "RUNNING";
-  job.updatedAt = new Date().toISOString();
-  if (run.status === "FAILED" || run.status === "BLOCKED") {
+  const now = new Date().toISOString();
+  job.status = run.status === "SUCCEEDED"
+    ? "SUCCEEDED"
+    : run.status === "TIMED_OUT"
+      ? "TIMED_OUT"
+      : run.status === "FAILED" || run.status === "BLOCKED"
+        ? "FAILED"
+        : "RUNNING";
+  job.updatedAt = now;
+  job.heartbeatAt = job.heartbeatAt ?? now;
+  if (run.status === "TIMED_OUT") {
+    job.timedOutAt = run.finishedAt ?? now;
+  }
+  if (run.status === "FAILED" || run.status === "BLOCKED" || run.status === "TIMED_OUT") {
     job.lastError = run.summary;
   }
 }
 
 function markJobRunningForRun(audit: AuditRecord, run: AuditRunSummary) {
   const job = audit.jobs.find((candidate) => candidate.runId === run.id);
-  if (!job || !["QUEUED", "DISPATCHED"].includes(job.status)) return;
+  if (!job || FINAL_RUN_STATUSES.includes(run.status)) return;
 
   const now = new Date().toISOString();
-  job.status = "RUNNING";
+  if (["QUEUED", "DISPATCHED", "RUNNING"].includes(job.status)) {
+    job.status = "RUNNING";
+  }
+  job.startedAt = job.startedAt ?? now;
   job.lockedAt = job.lockedAt ?? now;
+  job.heartbeatAt = now;
   job.updatedAt = now;
 }
 

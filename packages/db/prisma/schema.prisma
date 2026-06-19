@@ -62,6 +62,7 @@ enum RunStatus {
   SUCCEEDED
   FAILED
   BLOCKED
+  TIMED_OUT
 }
 
 model BrowserStep {
@@ -134,7 +135,12 @@ model AuditJob {
   status    AuditJobStatus @default(QUEUED)
   provider  String
   attempts  Int            @default(0)
+  retryCount Int           @default(0)
+  queuedAt  DateTime?
+  startedAt DateTime?
   lockedAt  DateTime?
+  heartbeatAt DateTime?
+  timedOutAt DateTime?
   lastError String?
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
@@ -146,6 +152,7 @@ enum AuditJobStatus {
   RUNNING
   SUCCEEDED
   FAILED
+  TIMED_OUT
   CANCELLED
 }
 

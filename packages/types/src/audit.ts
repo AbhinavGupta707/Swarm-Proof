@@ -1,12 +1,12 @@
 import type { PersonaMode } from "./agent";
 
 export type AuditStatus = "CREATED" | "PREFLIGHT" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
-export type RunStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";
+export type RunStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED" | "TIMED_OUT";
 export type IssueSeverity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type AuditOutcome = "pass" | "partial" | "fail";
 export type ArtifactKind = "SCREENSHOT" | "TRACE_ZIP" | "HAR" | "CONSOLE_LOG" | "NETWORK_LOG" | "VIDEO";
 export type AuditProvider = "demo" | "memory-demo-adapter" | "prisma-ready" | "postgres" | "local-playwright" | "browserbase-stagehand";
-export type AuditJobStatus = "QUEUED" | "DISPATCHED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type AuditJobStatus = "QUEUED" | "DISPATCHED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED";
 
 export type AuditPreflightSummary = {
   loadable: boolean;
@@ -35,7 +35,12 @@ export type AuditJobSummary = {
   status: AuditJobStatus;
   provider: AuditProvider;
   attempts: number;
+  retryCount?: number;
+  queuedAt?: string;
+  startedAt?: string;
   lockedAt?: string;
+  heartbeatAt?: string;
+  timedOutAt?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;

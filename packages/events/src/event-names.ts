@@ -6,6 +6,8 @@ export const Events = {
   AgentRunStarted: "agent_run_started",
   BrowserStepCompleted: "browser_step_completed",
   PersonaBlocked: "persona_blocked",
+  PersonaFailed: "persona_failed",
+  PersonaTimedOut: "persona_timed_out",
   IssueDetected: "issue_detected",
   RunCompleted: "run_completed",
   ReportGenerated: "report_generated",
