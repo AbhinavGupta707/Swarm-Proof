@@ -823,8 +823,6 @@ export function startWorkerAuditRun(auditId: string, callbackBaseUrl: string) {
     const personas = audit.modes.map((mode) => personaForMode(mode));
     for (const persona of personas) {
       const run = createRun(audit, persona);
-      run.status = "RUNNING";
-      run.startedAt = new Date().toISOString();
       audit.runs.push(run);
       createJob(audit, run.id, "DISPATCHED");
       appendEvent("agent_run_started", audit.id, {
@@ -1106,6 +1104,7 @@ export function recordWorkerStep(input: WorkerStepCallback) {
     screenshotUrl,
     artifactId: input.artifactId ?? artifact?.id
   });
+  run.startedAt = run.startedAt ?? new Date().toISOString();
   run.status = "RUNNING";
   markJobRunningForRun(audit, run);
   touch(audit);
@@ -1122,6 +1121,7 @@ export function completeWorkerRun(input: WorkerCompleteCallback) {
   run.status = input.status ?? (input.success ? "SUCCEEDED" : "FAILED");
   run.success = input.success;
   run.summary = input.summary;
+  run.startedAt = run.startedAt ?? new Date().toISOString();
   run.finishedAt = new Date().toISOString();
 
   for (const issue of input.issues ?? []) {
@@ -1297,7 +1297,6 @@ function createRun(audit: AuditRecord, persona: PersonaConfig): AuditRunSummary 
     viewport: `${persona.viewport.width}x${persona.viewport.height}`,
     status: "PENDING",
     summary: "",
-    startedAt: new Date().toISOString(),
     steps: []
   };
 }
@@ -1779,8 +1778,8 @@ function finalizeTimedOutAuditRecord(audit: AuditRecord, options: TimeoutFinaliz
       continue;
     }
 
-    const runStartedAt = toDate(run.startedAt) ?? auditStartedAt;
-    const personaTimedOut = now.getTime() - runStartedAt.getTime() >= personaBudget;
+    const runStartedAt = toDate(run.startedAt);
+    const personaTimedOut = runStartedAt ? now.getTime() - runStartedAt.getTime() >= personaBudget : false;
     if (!auditTimedOut && !personaTimedOut) {
       continue;
     }

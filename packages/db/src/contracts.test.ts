@@ -349,7 +349,7 @@ test("worker callback contracts record steps, issues, events, and artifacts", ()
   assert.equal(getAuditEvents(created.audit.id).events.some((event) => event.name === "browser_step_completed"), true);
 });
 
-test("worker dispatch plans create running jobs without completing deterministic runs", () => {
+test("worker dispatch plans create queued runs without completing deterministic runs", () => {
   resetMemoryStoreForTests();
   const created = createAudit({
     targetUrl: "/demo-target",
@@ -368,7 +368,8 @@ test("worker dispatch plans create running jobs without completing deterministic
 
   const running = getAuditOverview(created.audit.id);
   assert.equal(running.status, "RUNNING");
-  assert.equal(running.runs.every((run) => run.status === "RUNNING"), true);
+  assert.equal(running.runs.every((run) => run.status === "PENDING"), true);
+  assert.equal(running.runs.every((run) => !run.startedAt), true);
   assert.equal(running.jobs?.every((job) => job.status === "DISPATCHED"), true);
   const events = getAuditEvents(created.audit.id);
   assert.equal(events.provider, "local-playwright");
@@ -424,6 +425,59 @@ test("watchdog finalizes timed-out worker runs with a partial report", () => {
   assert.equal(finalized.jobs?.[0]?.status, "TIMED_OUT");
   assert.equal(finalized.report?.outcome, "partial");
   assert.equal(finalized.issues.some((issue) => issue.category === "Execution timeout"), true);
+});
+
+test("watchdog does not persona-timeout queued worker runs before they start", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://vercel.com/",
+    goal: "Explore public pricing and stop before signup or deployment.",
+    modes: ["normal", "mobile", "chaos"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  assert.equal(plan.runIds.length, 3);
+
+  const [normalRunId, mobileRunId, chaosRunId] = plan.runIds;
+  assert.ok(normalRunId);
+  assert.ok(mobileRunId);
+  assert.ok(chaosRunId);
+
+  const initial = getAuditOverview(created.audit.id);
+  assert.equal(initial.runs.every((run) => run.status === "PENDING"), true);
+  assert.equal(initial.runs.every((run) => !run.startedAt), true);
+
+  recordWorkerStep({
+    auditId: created.audit.id,
+    runId: normalRunId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open public target.",
+    result: "Public target loaded.",
+    url: "https://vercel.com/"
+  });
+
+  const afterFirstCallback = getAuditOverview(created.audit.id);
+  afterFirstCallback.runs[0]!.startedAt = new Date(Date.now() - 60_000).toISOString();
+
+  const finalized = finalizeTimedOutAudit(created.audit.id, {
+    now: new Date(),
+    personaTimeoutMs: 1,
+    auditTimeoutMs: 120_000
+  });
+
+  assert.equal(finalized.status, "RUNNING");
+  assert.equal(finalized.runs[0]?.status, "TIMED_OUT");
+  assert.equal(finalized.runs[1]?.status, "PENDING");
+  assert.equal(finalized.runs[2]?.status, "PENDING");
+  assert.equal(finalized.runs[1]?.steps?.length, 0);
+  assert.equal(finalized.runs[2]?.steps?.length, 0);
 });
 
 test("worker callbacks are idempotent for duplicate steps and terminal completions", () => {
