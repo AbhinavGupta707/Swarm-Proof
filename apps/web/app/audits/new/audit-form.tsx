@@ -52,6 +52,11 @@ export function AuditForm() {
         persona_count: modes.length
       });
 
+      trackEvent(Events.PreflightStarted, {
+        target_kind: demoTarget ? "demo" : "public",
+        persona_count: modes.length
+      });
+
       const preflightResponse = await fetch(`/api/audits/${createJson.data.auditId}/preflight`, { method: "POST" });
       trackEvent(Events.PreflightCompleted, {
         target_kind: demoTarget ? "demo" : "public",
