@@ -1,6 +1,7 @@
 import { blockWorkerAuditRun, getAuditOverview, startAuditRun, startWorkerAuditRun } from "@swarmproof/db";
 import type { WorkerHealthSummary, WorkerRunAgentRequest } from "@swarmproof/types";
 import { getBaseUrl, handleApiError, ok } from "../../../_lib";
+import { pendoTrackServer } from "@/lib/pendo-track";
 import type { NextRequest } from "next/server";
 
 type RouteContext = { params: Promise<{ auditId: string }> };
@@ -11,8 +12,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const workerBaseUrl = process.env.BROWSER_WORKER_URL?.replace(/\/$/, "");
 
     if (!workerBaseUrl) {
+      const runIds = startAuditRun(auditId);
+      pendoTrackServer("agent_run_started", {
+        audit_id: auditId,
+        run_count: runIds.length,
+        dispatched: false,
+        provider: "deterministic-demo",
+      });
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds,
         dispatched: false,
         provider: "deterministic-demo",
         fallbackReason: "BROWSER_WORKER_URL is not configured."
@@ -21,8 +29,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const health = await getWorkerHealth(workerBaseUrl);
     if (!health.ok) {
+      const runIds = startAuditRun(auditId);
+      pendoTrackServer("agent_run_started", {
+        audit_id: auditId,
+        run_count: runIds.length,
+        dispatched: false,
+        provider: "deterministic-demo",
+      });
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds,
         dispatched: false,
         provider: "deterministic-demo",
         fallbackReason: health.error
@@ -30,8 +45,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
 
     if (health.data.provider !== "local-playwright") {
+      const runIds = startAuditRun(auditId);
+      pendoTrackServer("agent_run_started", {
+        audit_id: auditId,
+        run_count: runIds.length,
+        dispatched: false,
+        provider: health.data.provider,
+      });
       return ok({
-        runIds: startAuditRun(auditId),
+        runIds,
         dispatched: false,
         provider: health.data.provider,
         fallbackReason: "Worker is healthy but not running the local-playwright provider."
@@ -44,6 +66,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Worker dispatch failed.";
       blockWorkerAuditRun(auditId, message);
+      pendoTrackServer("agent_run_started", {
+        audit_id: auditId,
+        run_count: plan.runIds.length,
+        dispatched: false,
+        provider: health.data.provider,
+      });
       return ok({
         runIds: plan.runIds,
         dispatched: false,
@@ -52,6 +80,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
       });
     }
 
+    pendoTrackServer("agent_run_started", {
+      audit_id: auditId,
+      run_count: plan.runIds.length,
+      dispatched: plan.requests.length > 0,
+      provider: health.data.provider,
+    });
     return ok({
       runIds: plan.runIds,
       dispatched: plan.requests.length > 0,

@@ -41,6 +41,19 @@ export function AuditForm() {
 
       await fetch(`/api/audits/${createJson.data.auditId}/preflight`, { method: "POST" });
       await fetch(`/api/audits/${createJson.data.auditId}/run`, { method: "POST" });
+
+      try {
+        const w = window as unknown as { pendo?: { track?: (name: string, props: Record<string, unknown>) => void } };
+        w.pendo?.track?.("url_submitted", {
+          mode: modes.join(","),
+          target_kind: forceDemo || targetUrl === "/demo-target" ? "demo" : "custom",
+          persona_count: modes.length,
+          goal_length: goal.length,
+          max_steps: 15,
+          is_demo: forceDemo,
+        });
+      } catch { /* tracking must not break application flow */ }
+
       router.push(`/audits/${createJson.data.auditId}/running`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not start audit.");
