@@ -62,6 +62,7 @@ test("default audit run creates normal, mobile, and chaos personas", () => {
   const overview = getAuditOverview(created.audit.id);
   assert.deepEqual(overview.runs.map((run) => run.mode).sort(), ["chaos", "mobile", "normal"]);
   assert.equal(overview.status, "COMPLETED");
+  assert.equal(overview.provider, "demo");
 });
 
 test("generated Playwright output includes navigation, action, and assertion", () => {
@@ -174,6 +175,10 @@ test("worker dispatch plans create running jobs without completing deterministic
   assert.equal(running.status, "RUNNING");
   assert.equal(running.runs.every((run) => run.status === "RUNNING"), true);
   assert.equal(running.jobs?.every((job) => job.status === "DISPATCHED"), true);
+  const events = getAuditEvents(created.audit.id);
+  assert.equal(events.provider, "local-playwright");
+  assert.equal(events.jobs.length, 3);
+  assert.equal(events.issues.length, 0);
 
   const blocked = blockWorkerAuditRun(created.audit.id, "Worker dispatch failed in test.");
   assert.equal(blocked.status, "COMPLETED");

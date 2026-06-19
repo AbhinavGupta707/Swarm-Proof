@@ -330,7 +330,15 @@ export function getAuditEvents(auditId: string) {
     steps: runSteps,
     runs: audit.runs,
     status: audit.status,
-    issueCount: audit.issues.length
+    issueCount: audit.issues.length,
+    issues: audit.issues,
+    artifacts: audit.artifacts,
+    jobs: audit.jobs,
+    provider: audit.provider,
+    maxSteps: audit.maxSteps,
+    preflight: audit.preflight,
+    completedAt: audit.completedAt,
+    updatedAt: audit.updatedAt
   };
 }
 

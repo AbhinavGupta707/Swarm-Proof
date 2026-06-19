@@ -107,11 +107,37 @@ export function auditSuccessRate(audit: AuditSummary) {
 }
 
 export function auditTimeToValue(audit: AuditSummary) {
-  return audit.id === demoAudit.id ? demoAudit.timeToValue : "deterministic run completed";
+  if (audit.id === demoAudit.id) {
+    return demoAudit.timeToValue;
+  }
+
+  if (audit.status === "RUNNING") {
+    return "Collecting evidence";
+  }
+
+  const firstIssueStep = audit.issues.flatMap((issue) => issue.evidenceStepIds ?? [])[0];
+  if (firstIssueStep) {
+    const step = audit.runs.flatMap((run) => run.steps ?? []).find((candidate) => candidate.id === firstIssueStep);
+    return step ? `Step ${step.stepIndex} first blocker` : "Issue evidence captured";
+  }
+
+  return audit.completedAt ? "Run completed" : "No blocker found";
 }
 
 export function auditPreflightLabel(audit: AuditSummary) {
-  return audit.id === demoAudit.id ? demoAudit.preflightLabel : audit.normalizedUrl ? "Safety preflight passed" : "Demo fallback";
+  if (audit.id === demoAudit.id) {
+    return demoAudit.preflightLabel;
+  }
+
+  if (audit.provider === "local-playwright") {
+    return audit.preflight?.isDemoTarget ? "Local Playwright demo run" : "Local Playwright safety-limited run";
+  }
+
+  if (audit.provider === "demo") {
+    return "Deterministic demo fallback";
+  }
+
+  return audit.normalizedUrl ? "Safety preflight passed" : "Demo fallback";
 }
 
 function severityBreakdown(audit: AuditSummary) {
@@ -129,6 +155,10 @@ function humanizeAction(action: string) {
 }
 
 function statusForRun(status: RunStatus, step: BrowserStepSummary): UiStepStatus {
+  if (step.status) {
+    return step.status;
+  }
+
   const lower = step.result.toLowerCase();
   if (lower.includes("blocked") || lower.includes("hidden") || lower.includes("duplicate") || lower.includes("invalid")) {
     return "failed";

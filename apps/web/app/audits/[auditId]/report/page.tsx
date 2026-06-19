@@ -33,7 +33,7 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Report {audit.id}</p>
             <h1 className="mt-2 text-4xl font-semibold tracking-normal">
-              {report?.outcome === "fail" ? "Needs fixes before real traffic." : "Partial pass with product friction."}
+              {audit.status === "RUNNING" ? "Evidence is still coming in." : report?.outcome === "fail" ? "Needs fixes before real traffic." : "Partial pass with product friction."}
             </h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">
               {report?.summary ?? "The desktop path reaches the team screen, but mobile layout, task language, duplicate submits, and validation need work before real users arrive."}
@@ -74,7 +74,7 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
           <div className="rounded-ui border border-line bg-panel p-5">
             <h2 className="text-lg font-semibold">Persona stories</h2>
             <div className="mt-4 grid gap-4">
-              {audit.runs.map((run) => (
+              {audit.runs.length ? audit.runs.map((run) => (
                 <div key={run.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-semibold">{run.persona}</p>
@@ -85,14 +85,18 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                     Replay evidence
                   </Link>
                 </div>
-              ))}
+              )) : (
+                <p className="rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
+                  Waiting for persona runs to start.
+                </p>
+              )}
             </div>
           </div>
 
           <div className="rounded-ui border border-line bg-panel p-5">
             <h2 className="text-lg font-semibold">Friction points</h2>
             <div className="mt-4 grid gap-4">
-              {audit.issues.map((issue) => (
+              {audit.issues.length ? audit.issues.map((issue) => (
                 <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
                   <p className={`w-fit rounded-ui px-2 py-1 font-mono text-xs font-semibold ${severityStyles[issue.severity]}`}>
                     {issue.severity} · {issue.category}
@@ -101,7 +105,11 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                   <p className="mt-2 leading-7 text-slate-700">{issue.description}</p>
                   <p className="mt-3 text-sm font-semibold">Suggested fix: {issue.suggestedFix}</p>
                 </article>
-              ))}
+              )) : (
+                <p className="rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
+                  No friction points have been recorded yet.
+                </p>
+              )}
             </div>
           </div>
         </section>

@@ -27,7 +27,7 @@ export default async function ReplayPage({ params }: { params: Promise<{ auditId
         </div>
 
         <section className="mt-8 grid gap-4 md:grid-cols-3">
-          {frames.map((frame) => (
+          {frames.length ? frames.map((frame) => (
             <article key={frame.id} className="rounded-ui border border-line bg-panel p-4 shadow-sm">
               <div className="aspect-video rounded-ui border border-line bg-mist p-3">
                 {frame.screenshotUrl ? (
@@ -57,19 +57,29 @@ export default async function ReplayPage({ params }: { params: Promise<{ auditId
                 {frame.finding}
               </p>
             </article>
-          ))}
+          )) : (
+            <div className="rounded-ui border border-dashed border-line bg-panel p-5 text-sm font-semibold text-slate-600 md:col-span-3">
+              Waiting for screenshot evidence from this persona.
+            </div>
+          )}
         </section>
 
         <section className="mt-6 rounded-ui border border-line bg-panel p-5">
           <h2 className="text-lg font-semibold">Event trail</h2>
-          <ol className="mt-4 grid gap-3">
-            {steps.map((step) => (
+          {steps.length ? (
+            <ol className="mt-4 grid gap-3">
+              {steps.map((step) => (
               <li key={step.id} className="grid gap-2 border-b border-line pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[4rem_1fr]">
                 <span className="font-mono text-sm text-slate-500">{step.time}</span>
                 <p className="text-sm leading-6 text-slate-700"><span className="font-semibold text-ink">{step.label}:</span> {step.result}</p>
               </li>
-            ))}
-          </ol>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-4 rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
+              Waiting for the first worker callback.
+            </p>
+          )}
         </section>
       </div>
     </main>
