@@ -17,4 +17,4 @@ COPY packages/types packages/types
 
 ENV BROWSER_PROVIDER=local-playwright
 
-CMD ["pnpm", "--filter", "@swarmproof/browser-worker", "dev"]
+CMD ["pnpm", "--filter", "@swarmproof/browser-worker", "start"]
