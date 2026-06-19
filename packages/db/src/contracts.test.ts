@@ -9,6 +9,7 @@ import {
   createAuditAsync,
   createShare,
   createShareAsync,
+  finalizeTimedOutAudit,
   generateAuditReportWithAi,
   getArtifactStorageStatus,
   getAuditArtifacts,
@@ -309,7 +310,7 @@ test("worker callback contracts record steps, issues, events, and artifacts", ()
   if (!created.ok) throw new Error("Audit creation failed");
 
   runPreflight(created.audit.id);
-  const [runId] = startAuditRun(created.audit.id);
+  const [runId] = startWorkerAuditRun(created.audit.id, baseUrl).runIds;
   const step = recordWorkerStep({
     runId,
     stepIndex: 99,
@@ -378,6 +379,154 @@ test("worker dispatch plans create running jobs without completing deterministic
   assert.equal(blocked.status, "COMPLETED");
   assert.equal(blocked.runs.every((run) => run.status === "BLOCKED"), true);
   assert.equal(blocked.issues.some((issue) => issue.title === "Browser worker could not start"), true);
+});
+
+test("watchdog finalizes timed-out worker runs with a partial report", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://stripe.com/pricing",
+    goal: "Explore public pricing and stop before signup, login, contact sales, payment, or private data.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open pricing.",
+    result: "Pricing page loaded.",
+    url: "https://stripe.com/pricing"
+  });
+
+  const oldStart = new Date(Date.now() - 60_000).toISOString();
+  const running = getAuditOverview(created.audit.id);
+  running.runs[0]!.startedAt = oldStart;
+
+  const finalized = finalizeTimedOutAudit(created.audit.id, {
+    now: new Date(),
+    personaTimeoutMs: 1,
+    auditTimeoutMs: 120_000
+  });
+
+  assert.equal(finalized.status, "COMPLETED");
+  assert.equal(finalized.runs[0]?.status, "TIMED_OUT");
+  assert.equal(finalized.jobs?.[0]?.status, "TIMED_OUT");
+  assert.equal(finalized.report?.outcome, "partial");
+  assert.equal(finalized.issues.some((issue) => issue.category === "Execution timeout"), true);
+});
+
+test("worker callbacks are idempotent for duplicate steps and terminal completions", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "/demo-target",
+    goal: "Sign up, create a project, invite a teammate.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const firstStep = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open demo.",
+    result: "Demo loaded.",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: `${baseUrl}/demo-target`
+  });
+  const duplicateStep = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open demo.",
+    result: "Demo loaded.",
+    screenshotBase64: "ZmFrZS1wbmc=",
+    url: `${baseUrl}/demo-target`
+  });
+
+  assert.equal(duplicateStep.id, firstStep.id);
+  assert.equal(getAuditOverview(created.audit.id).runs[0]?.steps?.length, 1);
+
+  const completion = {
+    auditId: created.audit.id,
+    runId,
+    success: false,
+    status: "FAILED" as const,
+    summary: "Worker crashed after the first evidence frame.",
+    issues: [{
+      severity: "MEDIUM" as const,
+      category: "Worker crash",
+      title: "Browser worker crashed before finishing",
+      description: "The worker reported a crash and the callback was retried.",
+      evidenceStepIds: [firstStep.id],
+      suggestedFix: "Retry after checking worker logs."
+    }]
+  };
+
+  const firstComplete = completeWorkerRun(completion);
+  const duplicateComplete = completeWorkerRun(completion);
+
+  assert.equal(firstComplete.issues.filter((issue) => issue.category === "Worker crash").length, 1);
+  assert.equal(duplicateComplete.issues.filter((issue) => issue.category === "Worker crash").length, 1);
+  assert.equal(duplicateComplete.report?.outcome, "partial");
+});
+
+test("polling event payload is capped while preserving latest worker state", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "/demo-target",
+    goal: "Sign up, create a project, invite a teammate.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  for (let index = 1; index <= 118; index += 1) {
+    recordWorkerStep({
+      auditId: created.audit.id,
+      runId,
+      stepIndex: index,
+      action: "observe",
+      status: "passed",
+      thought: "Observe safe public state.",
+      result: `Evidence step ${index}.`,
+      url: `${baseUrl}/demo-target`
+    });
+  }
+
+  const events = getAuditEvents(created.audit.id);
+  assert.equal(events.runs[0]?.steps?.length, 10);
+  assert.equal(events.runs[0]?.steps?.at(-1)?.stepIndex, 118);
+  assert.equal(events.eventCount && events.eventCount > events.events.length, true);
 });
 
 test("async persistence boundary preserves audit, callback, report, and share contracts", async () => {

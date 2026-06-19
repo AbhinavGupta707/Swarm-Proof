@@ -11,6 +11,7 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
   const { shareToken } = await params;
   const audit = await getSharedAuditForPage(shareToken);
   const metrics = auditMetrics(audit);
+  const partial = audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
 
   return (
     <main className="section">
@@ -26,9 +27,9 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Shared report {shareToken}</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-normal">SwarmProof audit evidence</h1>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">{partial ? "SwarmProof partial audit evidence" : "SwarmProof audit evidence"}</h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">
-              Public read-only evidence for: {audit.goal}. This view omits secrets, credentials, raw target content, and private URLs.
+              Public read-only evidence for: {audit.goal}. {partial ? "Some personas stopped early, timed out, or were safety-blocked, and the report preserves the evidence captured before that point. " : ""}This view omits secrets, credentials, raw target content, and private URLs.
             </p>
           </div>
           <Link className="inline-flex min-h-11 items-center gap-2 rounded-ui border border-line px-4 py-3 font-semibold hover:bg-mist" href="/novus-proof">

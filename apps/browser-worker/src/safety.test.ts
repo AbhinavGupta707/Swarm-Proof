@@ -71,3 +71,21 @@ test("commerce policy allows exploration but blocks commitment actions", () => {
     assert.equal(typeof commitmentStopReason(label), "string");
   }
 });
+
+test("worker safety blocks signup, deployment, sales, trial, account, and payment boundaries", () => {
+  for (const label of [
+    "Sign Up",
+    "Log in",
+    "Start Deploying",
+    "Add to Cart",
+    "Checkout",
+    "Payment",
+    "Contact Sales",
+    "Book Demo",
+    "Start Trial",
+    "Create Account"
+  ]) {
+    assert.equal(shouldSkipExternalAction(label), true, `${label} should be blocked`);
+    assert.equal(typeof commitmentStopReason(label), "string");
+  }
+});

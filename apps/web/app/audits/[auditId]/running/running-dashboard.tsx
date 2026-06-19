@@ -21,6 +21,7 @@ import { auditMetrics, auditPreflightLabel, auditSuccessRate, auditTimeline, aud
 
 type EventPayload = {
   events: AuditEventSummary[];
+  eventCount?: number;
   steps: BrowserStepSummary[];
   runs: AuditRunSummary[];
   status: AuditStatus;
@@ -45,6 +46,7 @@ const runStatusStyles: Record<RunStatus, string> = {
   BLOCKED: "bg-amber/10 text-amber",
   FAILED: "bg-crimson/10 text-crimson",
   SUCCEEDED: "bg-emerald/10 text-emerald",
+  TIMED_OUT: "bg-amber/10 text-amber",
   RUNNING: "bg-indigo/10 text-indigo",
   PENDING: "bg-slate-100 text-slate-600"
 };
@@ -73,6 +75,9 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
   const [lastUpdated, setLastUpdated] = useState(initialAudit.updatedAt ?? "");
 
   const hasActiveRun = audit.status === "RUNNING" || audit.runs.some((run) => run.status === "RUNNING" || run.status === "PENDING");
+  const timedOutRuns = audit.runs.filter((run) => run.status === "TIMED_OUT").length;
+  const crashedRuns = audit.issues.filter((issue) => issue.category === "Worker crash").length;
+  const partialReady = !hasActiveRun && audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
   const timeline = useMemo(() => auditTimeline(audit), [audit]);
   const metrics = useMemo(() => auditMetrics({ ...audit, eventCount }), [audit, eventCount]);
   const modeLabel = auditPreflightLabel(audit);
@@ -115,7 +120,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
           completedAt: data.completedAt ?? current.completedAt,
           updatedAt: data.updatedAt ?? current.updatedAt
         }));
-        setEventCount(data.events.length);
+        setEventCount(data.eventCount ?? data.events.length);
         setLastUpdated(data.updatedAt ?? "");
         setPollError("");
       } catch (error) {
@@ -146,7 +151,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Audit {audit.id}</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-normal">Personas are testing the goal.</h1>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">{headingForAudit(hasActiveRun, partialReady, timedOutRuns, crashedRuns)}</h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">{audit.goal}</p>
             <div className="mt-4 flex flex-wrap gap-2">
               <span className={`rounded-ui px-2 py-1 font-mono text-xs font-semibold ${auditStatusStyles[audit.status]}`}>{audit.status}</span>
@@ -160,7 +165,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
               Stop
             </button>
             <Link className="inline-flex min-h-11 items-center rounded-ui bg-emerald px-4 py-3 font-semibold text-white hover:bg-emerald/90" href={`/audits/${audit.id}/report`}>
-              Open report
+              {partialReady ? "Open partial report" : "Open report"}
             </Link>
           </div>
         </div>
@@ -217,6 +222,11 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
                 {hasActiveRun ? "polling live events" : "run settled"}
               </span>
             </div>
+            {partialReady ? (
+              <p className="mt-4 rounded-ui border border-amber/30 bg-amber/10 p-3 text-sm font-semibold text-amber">
+                Partial report ready. Timed out, blocked, or crashed personas are settled and can be retried after checking worker health.
+              </p>
+            ) : null}
             {pollError ? <p className="mt-4 rounded-ui border border-amber/30 bg-amber/10 p-3 text-sm font-semibold text-amber">{pollError}</p> : null}
             {timeline.length ? (
               <ol className="mt-5 grid gap-4">
@@ -250,7 +260,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
             </p>
             <h2 className="mt-3 text-2xl font-semibold">{audit.issues.length} issues found while the goal was in progress.</h2>
             <p className="mt-3 text-sm leading-6 text-slate-300">
-              {hasActiveRun ? "The report will update as callbacks arrive from the active run." : "The report, generated test, and share link are ready to inspect for this run."}
+              {hasActiveRun ? "The report will update as callbacks arrive from the active run." : partialReady ? "The partial report, generated test, and share link are ready; failed personas can be retried after the worker is healthy." : "The report, generated test, and share link are ready to inspect for this run."}
             </p>
             <div className="mt-5 grid gap-3 text-sm">
               <p className="flex items-center gap-2"><Clock3 className="h-4 w-4 text-emerald" aria-hidden="true" /> {auditTimeToValue(audit)}</p>
@@ -281,7 +291,7 @@ function EvidencePlaceholder({ mode, status }: { mode: AuditRunSummary["mode"]; 
       <div className="grid gap-2">
         <div className="h-3 w-3/4 rounded bg-slate-300" />
         <div className="h-3 w-1/2 rounded bg-slate-200" />
-        <div className={`h-8 w-28 rounded-ui ${status === "FAILED" ? "bg-crimson/20" : status === "RUNNING" ? "bg-indigo/20" : "bg-emerald/20"}`} />
+        <div className={`h-8 w-28 rounded-ui ${status === "FAILED" ? "bg-crimson/20" : status === "TIMED_OUT" || status === "BLOCKED" ? "bg-amber/20" : status === "RUNNING" ? "bg-indigo/20" : "bg-emerald/20"}`} />
       </div>
     </div>
   );
@@ -301,7 +311,16 @@ function summaryForRun(status: RunStatus) {
   if (status === "RUNNING") return "Worker is collecting browser evidence.";
   if (status === "SUCCEEDED") return "Persona completed without a blocker.";
   if (status === "FAILED") return "Persona found a failure.";
+  if (status === "TIMED_OUT") return "Persona timed out; partial evidence is ready and retry is safe.";
   return "Persona was blocked.";
+}
+
+function headingForAudit(hasActiveRun: boolean, partialReady: boolean, timedOutRuns: number, crashedRuns: number) {
+  if (hasActiveRun) return "Personas are testing the goal.";
+  if (timedOutRuns > 0) return "Partial report ready after timeout.";
+  if (crashedRuns > 0) return "Partial report ready after worker crash.";
+  if (partialReady) return "Partial report ready.";
+  return "Audit run settled cleanly.";
 }
 
 function formatTime(value: string) {

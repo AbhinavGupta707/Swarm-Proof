@@ -28,6 +28,7 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
   const report = audit.report;
   const fixes = suggestedFixesForAudit(audit);
   const bugReport = bugReportForAudit(audit);
+  const headline = reportHeadline(audit);
 
   return (
     <main className="section">
@@ -46,7 +47,7 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Report {audit.id}</p>
             <h1 className="mt-2 text-4xl font-semibold tracking-normal">
-              {audit.status === "RUNNING" ? "Evidence is still coming in." : report?.outcome === "fail" ? "Needs fixes before real traffic." : "Partial pass with product friction."}
+              {headline}
             </h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">
               {report?.summary ?? "The desktop path reaches the team screen, but mobile layout, task language, duplicate submits, and validation need work before real users arrive."}
@@ -166,4 +167,14 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
       </div>
     </main>
   );
+}
+
+function reportHeadline(audit: Awaited<ReturnType<typeof getAuditForPage>>) {
+  if (audit.status === "RUNNING") return "Evidence is still coming in.";
+  if (audit.runs.some((run) => run.status === "TIMED_OUT")) return "Partial report ready after timeout.";
+  if (audit.issues.some((issue) => issue.category === "Worker crash")) return "Partial report ready after worker crash.";
+  if (audit.runs.some((run) => run.status === "BLOCKED")) return "Safety-limited partial report ready.";
+  if (audit.report?.outcome === "fail") return "Needs fixes before real traffic.";
+  if (audit.report?.outcome === "pass") return "Clean pass for this audit path.";
+  return "Partial pass with product friction.";
 }

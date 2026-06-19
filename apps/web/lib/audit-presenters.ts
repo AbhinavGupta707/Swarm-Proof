@@ -115,6 +115,10 @@ export function auditTimeToValue(audit: AuditSummary) {
     return "Collecting evidence";
   }
 
+  if (audit.runs.some((run) => run.status === "TIMED_OUT")) {
+    return "Timed out with partial evidence";
+  }
+
   const firstIssueStep = audit.issues.flatMap((issue) => issue.evidenceStepIds ?? [])[0];
   if (firstIssueStep) {
     const step = audit.runs.flatMap((run) => run.steps ?? []).find((candidate) => candidate.id === firstIssueStep);
@@ -160,6 +164,9 @@ function statusForRun(status: RunStatus, step: BrowserStepSummary): UiStepStatus
   }
 
   const lower = step.result.toLowerCase();
+  if (status === "TIMED_OUT" || lower.includes("timeout") || lower.includes("timed out")) {
+    return "failed";
+  }
   if (lower.includes("blocked") || lower.includes("hidden") || lower.includes("duplicate") || lower.includes("invalid")) {
     return "failed";
   }

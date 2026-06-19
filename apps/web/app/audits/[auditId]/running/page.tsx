@@ -10,7 +10,10 @@ export default async function RunningAuditPage({ params }: { params: Promise<{ a
   let initialEventCount = audit.eventCount ?? 0;
 
   try {
-    initialEventCount = audit.id === auditId ? (await getAuditEventsAsync(auditId)).events.length : initialEventCount;
+    if (audit.id === auditId) {
+      const events = await getAuditEventsAsync(auditId);
+      initialEventCount = events.eventCount ?? events.events.length;
+    }
   } catch {
     initialEventCount = audit.eventCount ?? 0;
   }

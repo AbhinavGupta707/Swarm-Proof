@@ -111,6 +111,50 @@ test("external planner blocks unsafe commerce commitment actions", () => {
   assert.equal(plan.type, "none");
 });
 
+test("external planner blocks signup, deployment, sales, trial, and account actions", () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "link", label: "Start Deploying", href: "https://vercel.com/new", sameOrigin: true, ordinal: 0 },
+    { kind: "link", label: "Sign Up", href: "https://vercel.com/signup", sameOrigin: true, ordinal: 1 },
+    { kind: "button", label: "Contact Sales", ordinal: 2 },
+    { kind: "button", label: "Book Demo", ordinal: 3 },
+    { kind: "button", label: "Start Trial", ordinal: 4 },
+    { kind: "button", label: "Create Account", ordinal: 5 }
+  ];
+
+  const plan = planExternalAction({
+    goal: "Explore deployment, pricing, and docs only.",
+    personaMode: "normal",
+    candidates
+  });
+
+  assert.equal(plan.type, "none");
+});
+
+test("AI planner cannot choose unsafe public action ordinals", async () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "link", label: "Pricing", href: "https://example.com/pricing", sameOrigin: true, ordinal: 0 },
+    { kind: "link", label: "Start Deploying", href: "https://example.com/new", sameOrigin: true, ordinal: 1 }
+  ];
+  const unsafePlanner = {
+    async generateJson<T>() {
+      return { action: "choose_candidate", ordinal: 1, reason: "Deploy now." } as T;
+    }
+  };
+
+  const plan = await planExternalActionWithAi({
+    goal: "Explore deployment pricing without signup.",
+    personaMode: "normal",
+    candidates,
+    page: { url: "https://example.com", title: "Example" },
+    history: [],
+    aiProvider: unsafePlanner
+  });
+
+  assert.equal(plan.type, "click");
+  if (plan.type !== "click") throw new Error("Expected fallback safe click");
+  assert.equal(plan.candidate.label, "Pricing");
+});
+
 test("invalid AI planner output falls back to the safe deterministic planner", async () => {
   const candidates: ExternalCandidate[] = [
     { kind: "link", label: "Buy MacBook Air", href: "https://www.apple.com/shop/buy-mac/macbook-air", sameOrigin: true, ordinal: 0 },
