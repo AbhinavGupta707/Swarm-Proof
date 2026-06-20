@@ -1,4 +1,5 @@
 import type { PersonaMode } from "./agent";
+import type { EvidenceVerifierResult, GoalSpec, PageObservation, PlannerStepDiagnostic } from "./evidence";
 
 export type AuditStatus = "CREATED" | "PREFLIGHT" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 export type RunStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED" | "TIMED_OUT";
@@ -57,6 +58,10 @@ export type BrowserStepSummary = {
   result: string;
   screenshotUrl?: string;
   artifactId?: string;
+  observation?: PageObservation;
+  planner?: PlannerStepDiagnostic;
+  verifier?: EvidenceVerifierResult;
+  goalSpec?: GoalSpec;
   createdAt: string;
 };
 
@@ -72,6 +77,8 @@ export type AuditRunSummary = {
   finishedAt?: string;
   steps?: BrowserStepSummary[];
   artifacts?: ArtifactSummary[];
+  goalSpec?: GoalSpec;
+  verifierResult?: EvidenceVerifierResult;
 };
 
 export type AuditIssueSummary = {
@@ -103,6 +110,7 @@ export type AuditReportSummary = {
   reportJson: {
     outcome: AuditOutcome;
     issues: AuditIssueSummary[];
+    verifierResults?: EvidenceVerifierResult[];
     playwrightTests: Array<{ name: string; code: string }>;
   };
   createdAt: string;

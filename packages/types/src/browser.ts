@@ -1,5 +1,6 @@
 import type { PersonaConfig } from "./agent";
 import type { ArtifactKind, IssueSeverity } from "./audit";
+import type { EvidenceVerifierResult, GoalSpec, PageObservation, PlannerStepDiagnostic } from "./evidence";
 
 export type AgentAction =
   | { type: "click_text"; text: string; reason: string }
@@ -38,6 +39,10 @@ export type WorkerStepCallback = {
   screenshotUrl?: string;
   artifactId?: string;
   url?: string;
+  observation?: PageObservation;
+  planner?: PlannerStepDiagnostic;
+  verifier?: EvidenceVerifierResult;
+  goalSpec?: GoalSpec;
 };
 
 export type WorkerIssueCallback = {
@@ -58,6 +63,8 @@ export type WorkerCompleteCallback = {
   status?: "SUCCEEDED" | "FAILED" | "BLOCKED" | "TIMED_OUT";
   issues?: WorkerIssueCallback[];
   artifacts?: Array<{ type: ArtifactKind | string; url: string; meta?: Record<string, string | number | boolean> }>;
+  goalSpec?: GoalSpec;
+  verifierResult?: EvidenceVerifierResult;
 };
 
 export type WorkerHealthSummary = {
@@ -65,7 +72,9 @@ export type WorkerHealthSummary = {
   provider: "deterministic-demo" | "local-playwright";
   playwrightAvailable: boolean;
   aiPlannerConfigured?: boolean;
+  aiVerifierConfigured?: boolean;
   aiModel?: string;
+  goalCompiler?: "deterministic" | "llm";
   personas: string[];
   queueDepth?: number;
   activeRuns?: number;

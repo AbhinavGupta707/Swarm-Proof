@@ -42,6 +42,8 @@ server.listen(port, () => {
   console.log(`SwarmProof browser worker listening on http://localhost:${port}`);
   console.log(`Provider: ${activeProvider()}`);
   console.log(`AI planner configured: ${Boolean(process.env.FIREWORKS_API_KEY)} (${fireworksModel()})`);
+  console.log(`AI verifier configured: ${Boolean(process.env.FIREWORKS_API_KEY)} (${fireworksModel()})`);
+  console.log("Goal compiler: deterministic");
   console.log(`Registered personas: ${defaultPersonas.map((persona) => persona.mode).join(", ")}`);
 });
 
@@ -113,7 +115,9 @@ function workerHealth(): WorkerHealthSummary {
     provider: activeProvider(),
     playwrightAvailable: isPlaywrightPackageAvailable(),
     aiPlannerConfigured: Boolean(process.env.FIREWORKS_API_KEY),
+    aiVerifierConfigured: Boolean(process.env.FIREWORKS_API_KEY),
     aiModel: fireworksModel(),
+    goalCompiler: "deterministic",
     personas: defaultPersonas.map((persona) => persona.mode),
     queueDepth: queuedRuns.length,
     activeRuns: activeRunCount

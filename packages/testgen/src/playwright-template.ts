@@ -34,6 +34,7 @@ export function buildEvidencePlaywrightTest(input: {
   goal: string;
   steps: EvidenceTestStep[];
   issues: EvidenceTestIssue[];
+  verifiedEvidence?: string[];
 }) {
   const targetUrl = escapeForSingleQuotedString(input.targetUrl);
   const testName = escapeForSingleQuotedString(input.name);
@@ -114,12 +115,17 @@ function buildExternalObservedActions(steps: EvidenceTestStep[]) {
   return [...new Set(actions)];
 }
 
-function assertionPatternFor(input: { goal: string; steps: EvidenceTestStep[]; issues: EvidenceTestIssue[] }, demoTarget: boolean) {
-  const source = [
-    input.goal,
-    input.issues.map((issue) => `${issue.title} ${issue.category}`).join(" "),
-    input.steps.map((step) => `${step.result} ${step.thought ?? ""}`).join(" ")
-  ].join(" ");
+function assertionPatternFor(input: { goal: string; steps: EvidenceTestStep[]; issues: EvidenceTestIssue[]; verifiedEvidence?: string[] }, demoTarget: boolean) {
+  const source = demoTarget
+    ? [
+        input.goal,
+        input.issues.map((issue) => `${issue.title} ${issue.category}`).join(" "),
+        input.steps.map((step) => `${step.result} ${step.thought ?? ""}`).join(" ")
+      ].join(" ")
+    : [
+        (input.verifiedEvidence ?? []).join(" "),
+        input.steps.map((step) => `${step.result} ${step.thought ?? ""}`).join(" ")
+      ].join(" ");
   if (demoTarget) {
     const keywords = ["invite", "people", "project", "account", "error", "blocked", "success"].filter((word) => source.toLowerCase().includes(word));
     return keywords.length ? keywords.slice(0, 4).join("|") : "project|people|invite|error";

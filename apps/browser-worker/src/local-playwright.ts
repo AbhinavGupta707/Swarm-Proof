@@ -1,13 +1,29 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
-import { personaProfileForMode, type WorkerCompleteCallback, type WorkerIssueCallback, type WorkerRunAgentRequest, type WorkerStepCallback } from "@swarmproof/types";
+import {
+  personaProfileForMode,
+  type EvidenceVerifierResult,
+  type GoalSpec,
+  type PageObservation,
+  type PlannerStepDiagnostic,
+  type WorkerCompleteCallback,
+  type WorkerIssueCallback,
+  type WorkerRunAgentRequest,
+  type WorkerStepCallback
+} from "@swarmproof/types";
 import type { CallbackPoster } from "./deterministic-runner";
 import { isExecutableExternalPlan, planExternalActionWithAi, type ExternalCandidate, type ExternalCandidateCategory, type PlannedExternalAction } from "./external-planner";
+import { verifyEvidenceWithAi } from "./evidence-verifier";
+import { compileGoalSpec } from "./goal-spec";
+import { observePage, summarizeObservation } from "./page-observation";
 import { commitmentStopReason, hasStrongAuthWallSignals, isCrossOriginNavigation, isUnsafeWorkerUrl, type WorkerSafetyOptions } from "./safety";
 
 type EvidenceState = {
   stepIds: string[];
   consoleErrors: string[];
   networkFailures: string[];
+  observations: PageObservation[];
+  goalSpec?: GoalSpec;
+  verifierResult?: EvidenceVerifierResult;
 };
 
 export function isPlaywrightPackageAvailable() {
@@ -24,7 +40,7 @@ export async function runLocalPlaywrightAgent(input: WorkerRunAgentRequest, post
     headless: process.env.PLAYWRIGHT_HEADFUL !== "1"
   });
 
-  const state: EvidenceState = { stepIds: [], consoleErrors: [], networkFailures: [] };
+  const state: EvidenceState = { stepIds: [], consoleErrors: [], networkFailures: [], observations: [] };
   let context: BrowserContext | undefined;
 
   try {
@@ -211,67 +227,73 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   const history: string[] = [];
   let actionsTaken = 0;
   let stoppedForSafety = false;
-  let goalEvidenceReached = false;
   const persona = personaProfileForMode(input.persona.mode);
+  const targetOrigin = new URL(input.targetUrl).origin;
+  const goalSpec = compileGoalSpec({
+    goal: input.goal,
+    targetUrl: input.targetUrl,
+    personaMode: input.persona.mode,
+    allowFormActions: Boolean(input.allowExternalFormSubmissions)
+  });
+  state.goalSpec = goalSpec;
 
   await page.goto(input.targetUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
   visitedHrefs.add(page.url());
+  const initialObservation = await observePage(page, targetOrigin, `${input.runId}:1`);
+  state.observations.push(initialObservation);
+  state.verifierResult = await verifyEvidenceWithAi({ goalSpec, observations: state.observations });
   await emitStep(input, postCallback, state, {
     stepIndex: 1,
     action: "goto",
     thought: `${persona.name}: ${persona.goalInterpretation}`,
-    result: `Observation: loaded ${await safeTitle(page)} with safety interception enabled. Goal-evidence signal: initial page title and URL are available for this persona.`,
-    page
+    result: `${summarizeObservation(initialObservation)} Verifier: ${formatVerifierResult(state.verifierResult)} Safety interception is enabled.`,
+    page,
+    observation: initialObservation,
+    verifier: state.verifierResult,
+    goalSpec
   });
   history.push(`Loaded ${redactUrl(page.url())}.`);
 
-  const initialAuthWall = await withFallbackTimeout(
-    detectAuthWall(page),
-    5_000,
-    { blocked: false, reason: "" }
-  );
-  if (initialAuthWall.blocked) {
-    issues.push({
-      severity: "MEDIUM",
-      category: "Auth-limited flow",
-      title: "Audit reached an auth or verification wall",
-      description: `The public page showed a strong authentication or verification signal before the goal could continue: ${initialAuthWall.reason}.`,
-      evidenceStepIds: [...state.stepIds],
-      suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future authenticated-testing setup."
-    });
+  if (state.verifierResult.verdict === "SUCCEEDED") {
     await complete(input, postCallback, state, {
-      success: false,
-      status: "BLOCKED",
-      summary: "The external audit loaded the page but stopped at an auth-limited boundary.",
-      issues
+      success: true,
+      status: "SUCCEEDED",
+      summary: `Verifier confirmed the initial page already met the required evidence: ${state.verifierResult.explanation}`,
+      issues,
+      goalSpec,
+      verifierResult: finalizeVerifierStepIds(state.verifierResult, state)
     });
     return;
   }
 
   const maxAgentSteps = Math.max(2, Math.min(input.maxSteps - 1, 4));
   for (let offset = 0; offset < maxAgentSteps; offset += 1) {
-    const candidates = await withFallbackTimeout(
-      collectInteractiveCandidates(page, new URL(input.targetUrl).origin),
-      6_000,
-      []
-    );
+    const stepIndex = offset + 2;
+    const currentObservation = state.observations.at(-1) ?? await observePage(page, targetOrigin, `${input.runId}:${stepIndex}`);
+    const currentVerifier = state.verifierResult ?? await verifyEvidenceWithAi({ goalSpec, observations: state.observations });
+    if (currentVerifier.verdict === "SUCCEEDED") {
+      break;
+    }
+
+    if (currentVerifier.safetyFailures.length > 0) {
+      issues.push(issueForVerifier(currentVerifier, state));
+      break;
+    }
+
+    const candidates = currentObservation.actionCandidates;
     if (candidates.length === 0) {
       await emitStep(input, postCallback, state, {
-        stepIndex: offset + 2,
+        stepIndex,
         action: "observe",
         status: "warning",
         thought: `${persona.name} could not form a safe next action within the page budget.`,
-        result: "Observation: the worker could not read a stable set of safe visible actions before the per-step budget elapsed. Confusion signal: no reliable visible control set.",
-        page
+        result: `${summarizeObservation(currentObservation)} Verifier: ${formatVerifierResult(currentVerifier)}`,
+        page,
+        observation: currentObservation,
+        verifier: currentVerifier,
+        goalSpec
       });
-      issues.push({
-        severity: "LOW",
-        category: "Exploration limit",
-        title: "Visible action discovery timed out",
-        description: "The public page did not expose a stable set of safe controls quickly enough for this persona budget.",
-        evidenceStepIds: [...state.stepIds],
-        suggestedFix: "Retry with a narrower public URL or goal, and keep the target page responsive for unauthenticated users."
-      });
+      issues.push(issueForVerifier(currentVerifier, state));
       break;
     }
     const commitmentStops = commitmentStopsForCandidates(candidates);
@@ -282,18 +304,23 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       allowFormActions: Boolean(input.allowExternalFormSubmissions),
       visitedHrefs: [...visitedHrefs],
       usedOrdinals: [...usedOrdinals],
-      page: { url: page.url(), title: await safeTitleText(page) },
+      page: { url: currentObservation.url, title: currentObservation.title },
       history
     });
+    const planner = plannerDiagnosticFor(plan);
 
     if (plan.type === "none") {
       await emitStep(input, postCallback, state, {
-        stepIndex: offset + 2,
+        stepIndex,
         action: "observe",
         status: "warning",
         thought: formatPlanThought(plan),
-        result: `${await observeInteractiveSurface(page, candidates)} ${commitmentStops.length > 0 ? `Safety stop visible: ${formatCommitmentStops(commitmentStops)}.` : plan.reason} ${formatPlanResultSignal(plan)}`,
-        page
+        result: `${summarizeObservation(currentObservation)} ${commitmentStops.length > 0 ? `Safety stop visible: ${formatCommitmentStops(commitmentStops)}.` : plan.reason} ${formatPlanResultSignal(plan)} Verifier: ${formatVerifierResult(currentVerifier)}`,
+        page,
+        observation: currentObservation,
+        planner,
+        verifier: currentVerifier,
+        goalSpec
       });
       if (commitmentStops.length > 0 && actionsTaken > 0) {
         stoppedForSafety = true;
@@ -319,31 +346,34 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
 
     if (plan.type === "done") {
-      const currentTitle = await safeTitleText(page);
-      const verifiedGoalEvidence = hasGoalEvidenceForExternalRun(input.goal, page.url(), currentTitle, history);
       await emitStep(input, postCallback, state, {
-        stepIndex: offset + 2,
+        stepIndex,
         action: "done",
-        status: verifiedGoalEvidence ? "passed" : "warning",
+        status: "warning",
         thought: formatPlanThought(plan),
-        result: verifiedGoalEvidence
-          ? `Planner found enough evidence to stop: ${plan.evidence} ${formatPlanResultSignal(plan)}`
-          : `Planner claimed enough evidence, but the current URL, title, and action trace did not verify the requested goal. Evidence claim: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
-        page
+        result: `Planner requested success, but success is verifier-only. Evidence claim: ${plan.evidence} ${formatPlanResultSignal(plan)} Verifier: ${formatVerifierResult(currentVerifier)}`,
+        page,
+        observation: currentObservation,
+        planner,
+        verifier: currentVerifier,
+        goalSpec
       });
-      goalEvidenceReached = verifiedGoalEvidence;
-      history.push(`${verifiedGoalEvidence ? "Done" : "Unverified done"}: ${plan.evidence}`);
+      history.push(`Verifier-only done rejected: ${plan.evidence}`);
       break;
     }
 
     if (plan.type === "fail") {
       await emitStep(input, postCallback, state, {
-        stepIndex: offset + 2,
+        stepIndex,
         action: "fail",
         status: "failed",
         thought: formatPlanThought(plan),
-        result: `Planner could not continue safely: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
-        page
+        result: `Planner could not continue safely: ${plan.evidence} ${formatPlanResultSignal(plan)} Verifier: ${formatVerifierResult(currentVerifier)}`,
+        page,
+        observation: currentObservation,
+        planner,
+        verifier: currentVerifier,
+        goalSpec
       });
       issues.push({
         severity: "LOW",
@@ -379,14 +409,21 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
     visitedHrefs.add(page.url());
     actionsTaken += 1;
+    const afterObservation = await observePage(page, targetOrigin, `${input.runId}:${stepIndex}`);
+    state.observations.push(afterObservation);
+    state.verifierResult = await verifyEvidenceWithAi({ goalSpec, observations: state.observations });
 
     await emitStep(input, postCallback, state, {
-      stepIndex: offset + 2,
+      stepIndex,
       action: plan.type === "fill" ? "fill_label" : `click_${plan.candidate.kind}`,
       status: result.ok ? "passed" : "failed",
       thought: formatPlanThought(plan),
-      result: `${result.message} ${formatPlanResultSignal(plan)}${result.ok ? goalEvidenceSignal(input.goal, page.url(), await safeTitleText(page), history) : " Confusion signal: planned action did not complete."}`,
-      page
+      result: `${result.message} ${formatPlanResultSignal(plan)} ${result.ok ? `Verifier: ${formatVerifierResult(state.verifierResult)}` : "Confusion signal: planned action did not complete."}`,
+      page,
+      observation: afterObservation,
+      planner,
+      verifier: state.verifierResult,
+      goalSpec
     });
     history.push(`${plan.type}: ${plan.candidate.label} -> ${result.message}`);
 
@@ -402,56 +439,52 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       break;
     }
 
-    if (hasGoalEvidenceForExternalRun(input.goal, page.url(), await safeTitleText(page), history)) {
-      goalEvidenceReached = true;
-      history.push(`Goal evidence reached on ${redactUrl(page.url())}.`);
+    if (state.verifierResult.verdict === "SUCCEEDED") {
+      history.push(`Verifier reached required evidence on ${redactUrl(page.url())}.`);
       break;
     }
 
-    const authWall = await withFallbackTimeout(
-      detectAuthWall(page),
-      5_000,
-      { blocked: false, reason: "" }
-    );
-    if (authWall.blocked) {
-      issues.push({
-        severity: "MEDIUM",
-        category: "Auth-limited flow",
-        title: "Audit reached an auth or verification wall",
-        description: `After a safe public action, the page showed a strong authentication or verification signal: ${authWall.reason}.`,
-        evidenceStepIds: [...state.stepIds],
-        suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future authenticated-testing setup."
-      });
+    if (state.verifierResult.safetyFailures.length > 0) {
+      issues.push(issueForVerifier(state.verifierResult, state));
       break;
     }
   }
 
   addConsoleAndNetworkIssues(issues, state);
-  if (!goalEvidenceReached && !issues.some((issue) => issue.category === "Auth-limited flow" || issue.category === "Safety stop" || issue.category === "Goal evidence")) {
-    issues.push({
-      severity: "LOW",
-      category: "Goal evidence",
-      title: "Goal evidence was not reached within the safe step budget",
-      description: "The worker explored safe public pages but did not collect enough specific evidence for the requested goal before the persona step budget ended.",
-      evidenceStepIds: [...state.stepIds],
-      suggestedFix: "Start from a more specific public URL, expose a clearer public docs/navigation path, or increase the future step budget for this target."
-    });
+  const finalVerifier = finalizeVerifierStepIds(
+    state.verifierResult ?? await verifyEvidenceWithAi({ goalSpec, observations: state.observations }),
+    state
+  );
+  state.verifierResult = finalVerifier;
+  if (finalVerifier.verdict !== "SUCCEEDED" && !issues.some((issue) => issue.category === "Auth-limited flow" || issue.category === "Safety stop" || issue.category === "Goal evidence")) {
+    issues.push(issueForVerifier(finalVerifier, state));
   }
-  const authLimited = issues.some((issue) => issue.category === "Auth-limited flow");
   const missedGoal = issues.some((issue) => issue.category === "Goal evidence");
-  const succeeded = goalEvidenceReached && !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL");
+  const terminal = externalRunCompletionFromVerifier(finalVerifier, issues);
   await complete(input, postCallback, state, {
-    success: succeeded,
-    status: succeeded ? "SUCCEEDED" : "BLOCKED",
+    success: terminal.success,
+    status: terminal.status,
     summary: stoppedForSafety
       ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), then stopped before cart, checkout, payment, or private-data commitment.`
       : missedGoal
-        ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), but did not reach enough specific evidence for the goal.`
+        ? `The verifier found partial evidence after ${actionsTaken} safe public-site action(s), but required evidence is still missing: ${finalVerifier.missingRequirements.map((item) => item.label).join(", ")}.`
       : actionsTaken > 0
-      ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s).`
-      : "The local Playwright worker loaded the public URL but stopped before unsafe or irrelevant actions.",
-    issues
+      ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s). Verifier verdict: ${finalVerifier.verdict}.`
+      : `The local Playwright worker loaded the public URL but stopped before unsafe or irrelevant actions. Verifier verdict: ${finalVerifier.verdict}.`,
+    issues,
+    goalSpec,
+    verifierResult: finalVerifier
   });
+}
+
+export function externalRunCompletionFromVerifier(verifier: EvidenceVerifierResult, issues: WorkerIssueCallback[] = []) {
+  const hasHardIssue = issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL");
+  const authLimited = issues.some((issue) => issue.category === "Auth-limited flow");
+  const success = verifier.verdict === "SUCCEEDED" && !authLimited && !hasHardIssue;
+  return {
+    success,
+    status: success ? "SUCCEEDED" as const : verifier.verdict === "FAILED" ? "FAILED" as const : "BLOCKED" as const
+  };
 }
 
 async function emitStep(
@@ -465,6 +498,10 @@ async function emitStep(
     thought: string;
     result: string;
     page: Page;
+    observation?: PageObservation;
+    planner?: PlannerStepDiagnostic;
+    verifier?: EvidenceVerifierResult;
+    goalSpec?: GoalSpec;
   }
 ) {
   const payload: WorkerStepCallback = {
@@ -476,7 +513,11 @@ async function emitStep(
     thought: step.thought,
     result: step.result,
     url: step.page.url(),
-    screenshotBase64: await screenshotBase64(step.page)
+    screenshotBase64: await screenshotBase64(step.page),
+    observation: step.observation,
+    planner: step.planner,
+    verifier: step.verifier,
+    goalSpec: step.goalSpec
   };
 
   const recorded = await postCallback<{ id?: string }>("step", payload);
@@ -487,7 +528,7 @@ async function complete(
   input: WorkerRunAgentRequest,
   postCallback: CallbackPoster,
   state: EvidenceState,
-  result: Pick<WorkerCompleteCallback, "success" | "status" | "summary" | "issues">
+  result: Pick<WorkerCompleteCallback, "success" | "status" | "summary" | "issues" | "goalSpec" | "verifierResult">
 ) {
   const artifacts: WorkerCompleteCallback["artifacts"] = [];
   if (state.consoleErrors.length > 0) {
@@ -504,8 +545,85 @@ async function complete(
     status: result.status,
     summary: result.summary,
     issues: result.issues,
-    artifacts
+    artifacts,
+    goalSpec: result.goalSpec ?? state.goalSpec,
+    verifierResult: result.verifierResult ?? state.verifierResult
   });
+}
+
+function plannerDiagnosticFor(plan: PlannedExternalAction): PlannerStepDiagnostic {
+  const base = {
+    reason: plan.reason,
+    confidence: plan.confidence,
+    expectedEvidence: plan.expectedEvidence
+  };
+
+  if (plan.type === "click" || plan.type === "fill") {
+    return {
+      type: plan.type,
+      ...base,
+      candidateLabel: plan.candidate.label,
+      candidateKind: plan.candidate.kind,
+      candidateCategory: plan.candidate.category
+    };
+  }
+
+  return {
+    type: plan.type === "fail" ? "fail" : plan.type === "none" ? "none" : "observe",
+    ...base
+  };
+}
+
+function formatVerifierResult(verifier: EvidenceVerifierResult) {
+  const met = verifier.metRequirements.map((item) => item.label).join(", ") || "none";
+  const missing = verifier.missingRequirements.map((item) => item.label).join(", ") || "none";
+  return `${verifier.verdict} (${Math.round(verifier.confidence * 100)}% confidence). Met: ${met}. Missing: ${missing}. ${verifier.explanation}`;
+}
+
+function issueForVerifier(verifier: EvidenceVerifierResult, state: EvidenceState): WorkerIssueCallback {
+  if (verifier.safetyFailures.length > 0) {
+    return {
+      severity: "MEDIUM",
+      category: "Auth-limited flow",
+      title: "Audit reached an auth, verification, or forbidden boundary",
+      description: verifier.explanation,
+      evidenceStepIds: [...state.stepIds],
+      suggestedFix: "Run SwarmProof on a public unauthenticated flow or add a future owner-approved authenticated-testing setup."
+    };
+  }
+
+  if (verifier.verdict === "BLOCKED") {
+    return {
+      severity: "LOW",
+      category: "Exploration limit",
+      title: "No safe action exposed the missing evidence",
+      description: verifier.explanation,
+      evidenceStepIds: [...state.stepIds],
+      suggestedFix: "Expose a clearer public same-origin path to the goal evidence before signup, checkout, sales, or private-data steps."
+    };
+  }
+
+  return {
+    severity: "LOW",
+    category: "Goal evidence",
+    title: "Required goal evidence was not fully met",
+    description: verifier.explanation,
+    evidenceStepIds: [...state.stepIds],
+    suggestedFix: "Start from a more specific public URL, clarify goal-relevant labels, or add public read-only evidence before commitment boundaries."
+  };
+}
+
+function finalizeVerifierStepIds(verifier: EvidenceVerifierResult, state: EvidenceState): EvidenceVerifierResult {
+  if (verifier.supportingStepIds.length > 0 && verifier.supportingStepIds.every((id) => state.stepIds.includes(id))) {
+    return verifier;
+  }
+
+  return {
+    ...verifier,
+    supportingStepIds: verifier.verdict === "SUCCEEDED" || verifier.metRequirements.length > 0
+      ? [...state.stepIds]
+      : verifier.supportingStepIds
+  };
 }
 
 function safetyOptionsFor(input: WorkerRunAgentRequest): WorkerSafetyOptions {

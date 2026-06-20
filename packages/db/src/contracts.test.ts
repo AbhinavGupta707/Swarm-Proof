@@ -35,6 +35,44 @@ import {
 
 const baseUrl = "https://swarmproof.test";
 
+function partialVerifier(metLabels: string[], missingLabels: string[]) {
+  return {
+    verdict: "PARTIAL" as const,
+    confidence: 0.56,
+    metRequirements: metLabels.map((label, index) => ({
+      id: `met_${index}`,
+      label,
+      evidence: [`Observed ${label}`]
+    })),
+    missingRequirements: missingLabels.map((label, index) => ({
+      id: `missing_${index}`,
+      label,
+      evidence: []
+    })),
+    explanation: `Partial evidence only. Missing: ${missingLabels.join(", ")}.`,
+    supportingStepIds: [],
+    safetyFailures: [],
+    judge: { used: false, provider: "deterministic" as const }
+  };
+}
+
+function successVerifier(metLabels: string[]) {
+  return {
+    verdict: "SUCCEEDED" as const,
+    confidence: 0.91,
+    metRequirements: metLabels.map((label, index) => ({
+      id: `met_${index}`,
+      label,
+      evidence: [`Observed ${label}`]
+    })),
+    missingRequirements: [],
+    explanation: `Required evidence met: ${metLabels.join(", ")}.`,
+    supportingStepIds: [],
+    safetyFailures: [],
+    judge: { used: false, provider: "deterministic" as const }
+  };
+}
+
 test("URL safety blocks private and internal targets while allowing the demo target", () => {
   const blocked = [
     "http://localhost:3000",
@@ -328,6 +366,102 @@ test("external report summary prioritizes missed goal evidence over generic auth
   const overview = getAuditOverview(created.audit.id);
   assert.match(overview.report?.summary ?? "", /Goal evidence not reached/);
   assert.doesNotMatch(overview.report?.summary ?? "", /^Auth-limited stop/);
+});
+
+test("verifier result is required for a clean external pass", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://www.apple.com/macbook-air/",
+    goal: "Compare MacBook Air pricing and configuration choices.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const step = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "passed",
+    thought: "Planner followed token-overlap evidence.",
+    result: "Goal-evidence signal: current URL, title, or action history matches the requested goal.",
+    url: "https://www.apple.com/macbook-neo/",
+    planner: {
+      type: "click",
+      reason: "Matched generic MacBook pricing tokens.",
+      confidence: 0.7,
+      candidateLabel: "Buy MacBook Neo",
+      candidateKind: "link",
+      candidateCategory: "product"
+    },
+    verifier: partialVerifier(["Pricing or plan evidence"], ["MacBook Air product identity", "Configuration or option evidence"])
+  });
+
+  const partial = completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Legacy callback claimed success from token overlap.",
+    verifierResult: partialVerifier(["Pricing or plan evidence"], ["MacBook Air product identity", "Configuration or option evidence"]),
+    issues: []
+  });
+
+  assert.equal(partial.runs[0]?.status, "SUCCEEDED");
+  assert.equal(partial.runs[0]?.verifierResult?.verdict, "PARTIAL");
+  assert.equal(partial.report?.outcome, "partial");
+  assert.equal(partial.report?.reportJson.verifierResults?.[0]?.verdict, "PARTIAL");
+  assert.match(partial.report?.markdown ?? "", /Evidence verification/);
+  assert.match(partial.report?.markdown ?? "", /MacBook Air product identity/);
+  assert.equal(getAuditEvents(created.audit.id).steps.some((item) => item.id === step.id && item.verifier?.verdict === "PARTIAL"), true);
+
+  resetMemoryStoreForTests();
+  const passed = createAudit({
+    targetUrl: "https://www.apple.com/macbook-air/",
+    goal: "Compare MacBook Air pricing and configuration choices.",
+    modes: ["normal"],
+    baseUrl
+  });
+  assert.equal(passed.ok, true);
+  if (!passed.ok) throw new Error("Audit creation failed");
+
+  runPreflight(passed.audit.id);
+  const passedPlan = startWorkerAuditRun(passed.audit.id, baseUrl);
+  const passedRunId = passedPlan.runIds[0];
+  assert.ok(passedRunId);
+
+  recordWorkerStep({
+    auditId: passed.audit.id,
+    runId: passedRunId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "passed",
+    thought: "Open compare page.",
+    result: "Clicked \"Compare MacBook Air models\". Current page title is \"Compare Mac Models\".",
+    url: "https://www.apple.com/mac/compare/",
+    verifier: successVerifier(["MacBook Air product identity", "Pricing or plan evidence", "Configuration or option evidence"])
+  });
+  const clean = completeWorkerRun({
+    auditId: passed.audit.id,
+    runId: passedRunId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Verifier confirmed all required evidence.",
+    verifierResult: successVerifier(["MacBook Air product identity", "Pricing or plan evidence", "Configuration or option evidence"]),
+    issues: []
+  });
+
+  assert.equal(clean.report?.outcome, "pass");
+  assert.match(clean.generatedTest, /MacBook Air|Compare MacBook Air/i);
+  assert.doesNotMatch(clean.generatedTest, /project|people|invite/i);
 });
 
 test("external report synthesis compares persona stories and divergence", () => {
@@ -839,6 +973,102 @@ test("share, database status, and artifact status expose persistence-ready contr
   assert.equal(getDatabaseStatus().prismaReady, true);
   assert.equal(getDatabaseStatus().activeAdapter, "memory");
   assert.equal(getArtifactStorageStatus().localFallback, true);
+});
+
+test("public shares scrub observation, planner, and raw verifier evidence", () => {
+  resetMemoryStoreForTests();
+  const privateObservationMarker = "PRIVATE_OBSERVATION_SNIPPET_SHOULD_NOT_LEAK";
+  const privatePlannerMarker = "PRIVATE_PLANNER_REASON_SHOULD_NOT_LEAK";
+  const privateVerifierMarker = "PRIVATE_VERIFIER_EVIDENCE_SHOULD_NOT_LEAK";
+  const created = createAudit({
+    targetUrl: "https://example.com/products",
+    goal: "Compare product pricing and docs without signing up.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const verifier = {
+    verdict: "SUCCEEDED" as const,
+    confidence: 0.88,
+    metRequirements: [{
+      id: "pricing",
+      label: "Pricing evidence",
+      evidence: [privateVerifierMarker]
+    }],
+    missingRequirements: [],
+    explanation: "Required evidence met.",
+    supportingStepIds: ["step-private"],
+    safetyFailures: [],
+    judge: { used: false, provider: "deterministic" as const }
+  };
+
+  recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "observe",
+    status: "passed",
+    thought: "Observe product options.",
+    result: "Product pricing page loaded and public labels were visible.",
+    url: "https://example.com/products",
+    observation: {
+      version: 1,
+      stepId: "step-private",
+      url: "https://example.com/products",
+      title: "Products",
+      headings: ["Products"],
+      visibleSnippets: [privateObservationMarker],
+      links: [],
+      buttons: [],
+      forms: [],
+      actionCandidates: [],
+      pageCategory: "product",
+      riskSignals: [],
+      evidenceCandidates: [{
+        source: "snippet",
+        text: privateObservationMarker,
+        requirementIds: ["pricing"]
+      }],
+      capturedAt: new Date().toISOString()
+    },
+    planner: {
+      type: "observe",
+      reason: privatePlannerMarker,
+      confidence: 0.74,
+      expectedEvidence: privateVerifierMarker
+    },
+    verifier
+  });
+
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Verifier confirmed public pricing evidence.",
+    verifierResult: verifier,
+    issues: []
+  });
+
+  const share = createShare(created.audit.id, baseUrl);
+  const shared = getSharedReport(share.shareToken);
+  assert.ok(shared);
+  assert.equal(shared.runs[0]?.steps?.[0]?.observation, undefined);
+  assert.equal(shared.runs[0]?.steps?.[0]?.planner, undefined);
+  assert.deepEqual(shared.runs[0]?.verifierResult?.metRequirements[0]?.evidence, []);
+  assert.deepEqual(shared.report?.reportJson.verifierResults?.[0]?.metRequirements[0]?.evidence, []);
+  const publicPayload = JSON.stringify(shared);
+  assert.doesNotMatch(publicPayload, new RegExp(privateObservationMarker));
+  assert.doesNotMatch(publicPayload, new RegExp(privatePlannerMarker));
+  assert.doesNotMatch(publicPayload, new RegExp(privateVerifierMarker));
 });
 
 test("persistence config selects memory, postgres, and Supabase REST adapters", () => {

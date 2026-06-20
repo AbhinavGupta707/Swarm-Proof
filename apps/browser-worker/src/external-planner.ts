@@ -1,33 +1,10 @@
 import { createAiProvider, externalActionPlannerSystemPrompt, type AiProvider } from "@swarmproof/ai";
-import { personaProfileForMode, type PersonaMode } from "@swarmproof/types";
+import { personaProfileForMode, type ObservedActionCandidate, type ObservedActionCategory, type ObservedActionKind, type PersonaMode } from "@swarmproof/types";
 import { shouldSkipExternalAction } from "./safety";
 
-export type ExternalCandidateKind = "link" | "button" | "input";
-export type ExternalCandidateCategory =
-  | "docs"
-  | "pricing"
-  | "product"
-  | "search"
-  | "navigation"
-  | "commerce"
-  | "support"
-  | "auth"
-  | "unsafe"
-  | "legal"
-  | "unknown";
-
-export type ExternalCandidate = {
-  kind: ExternalCandidateKind;
-  label: string;
-  ordinal: number;
-  href?: string;
-  sameOrigin?: boolean;
-  inputType?: string;
-  disabled?: boolean;
-  sectionLabel?: string;
-  nearbyText?: string;
-  category?: ExternalCandidateCategory;
-};
+export type ExternalCandidateKind = ObservedActionKind;
+export type ExternalCandidateCategory = ObservedActionCategory;
+export type ExternalCandidate = ObservedActionCandidate;
 
 type PlannerMetadata = {
   observation: string;
@@ -147,13 +124,16 @@ function validateAiDecision(
   }
 
   if (decision.action === "done" && reason) {
+    if (isExecutableExternalPlan(fallback)) {
+      return fallback;
+    }
+
     return {
-      type: "done",
-      reason,
-      evidence: normalizeReason(decision.evidence) || reason,
-      score: 100,
+      type: "none",
+      reason: `AI planner suggested done, but success is verifier-only: ${reason}`,
+      score: 0,
       ...aiMetadata,
-      stopReason: aiMetadata.stopReason || reason
+      stopReason: aiMetadata.stopReason || "Planner cannot mark success; verifier must prove required evidence."
     };
   }
 

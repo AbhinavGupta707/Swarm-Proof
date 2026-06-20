@@ -25,6 +25,7 @@ type SafeProps = Record<string, string | number | boolean | null>;
 type PreflightResult = AuditPreflightSummary;
 type AuditOutcomeValue = AuditReportSummary["outcome"];
 type StepEvidence = { run: AuditRunSummary; step: BrowserStepSummary };
+type EvidenceVerifierSummary = NonNullable<AuditRunSummary["verifierResult"]>;
 type EvidenceStats = {
   runCount: number;
   completedRunCount: number;
@@ -32,6 +33,9 @@ type EvidenceStats = {
   failedRunCount: number;
   blockedRunCount: number;
   timedOutRunCount: number;
+  verifierSucceededRunCount: number;
+  verifierPartialRunCount: number;
+  verifierMissingRunCount: number;
   stepCount: number;
   issueCount: number;
   artifactCount: number;
@@ -193,7 +197,7 @@ export async function getSharedReportAsync(shareToken: string) {
   const snapshot = await readSnapshotByShareToken(shareToken);
   if (snapshot) {
     restoreSnapshot(snapshot);
-    return toSummary(snapshot.audit);
+    return toPublicSummary(snapshot.audit);
   }
 
   return shareToken === "demo-share" ? getSharedReport(shareToken) : undefined;
@@ -936,9 +940,10 @@ export function generateAuditReport(auditId: string) {
   const generatedTest = buildGeneratedTest(audit);
   const hasPartialRun = audit.runs.some((run) => FINAL_RUN_STATUSES.includes(run.status) && run.status !== "SUCCEEDED");
   const hasUnfinishedRun = audit.runs.some((run) => !FINAL_RUN_STATUSES.includes(run.status));
+  const verifierCleanPass = audit.runs.length > 0 && audit.runs.every((run) => run.status === "SUCCEEDED" && run.verifierResult?.verdict === "SUCCEEDED");
   const outcome: AuditOutcomeValue = audit.issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
     ? "fail"
-    : audit.issues.length > 0 || hasPartialRun || hasUnfinishedRun
+    : audit.issues.length > 0 || hasPartialRun || hasUnfinishedRun || !verifierCleanPass
       ? "partial"
       : "pass";
   const score = calculateScore(audit);
@@ -953,6 +958,7 @@ export function generateAuditReport(auditId: string) {
     reportJson: {
       outcome,
       issues: audit.issues,
+      verifierResults: audit.runs.flatMap((run) => run.verifierResult ? [run.verifierResult] : []),
       playwrightTests: [{ name: "swarmproof generated smoke test", code: generatedTest }]
     },
     createdAt: audit.report?.createdAt ?? now
@@ -1018,7 +1024,7 @@ export function createShare(auditId: string, baseUrl: string) {
 export function getSharedReport(shareToken: string) {
   for (const audit of getStore().audits.values()) {
     if (audit.shareToken === shareToken) {
-      return toSummary(audit);
+      return toPublicSummary(audit);
     }
   }
 
@@ -1032,7 +1038,7 @@ export function getSharedReport(shareToken: string) {
     if (created.ok) {
       startAuditRun(created.audit.id);
       created.audit.shareToken = "demo-share";
-      return toSummary(created.audit);
+      return toPublicSummary(created.audit);
     }
   }
 
@@ -1102,13 +1108,26 @@ export function recordWorkerStep(input: WorkerStepCallback) {
     result: input.result,
     url: input.url,
     screenshotUrl,
-    artifactId: input.artifactId ?? artifact?.id
+    artifactId: input.artifactId ?? artifact?.id,
+    observation: input.observation,
+    planner: input.planner,
+    verifier: input.verifier,
+    goalSpec: input.goalSpec
   });
+  run.goalSpec = run.goalSpec ?? input.goalSpec;
+  run.verifierResult = input.verifier ?? run.verifierResult;
   run.startedAt = run.startedAt ?? new Date().toISOString();
   run.status = "RUNNING";
   markJobRunningForRun(audit, run);
   touch(audit);
-  appendEvent("browser_step_completed", audit.id, { persona: run.mode, stepIndex: step.stepIndex });
+  appendEvent("browser_step_completed", audit.id, {
+    persona: run.mode,
+    stepIndex: step.stepIndex,
+    action: step.action,
+    plannerType: step.planner?.type ?? null,
+    verifierVerdict: step.verifier?.verdict ?? null,
+    missingRequirements: step.verifier?.missingRequirements.length ?? null
+  });
   return step;
 }
 
@@ -1123,6 +1142,8 @@ export function completeWorkerRun(input: WorkerCompleteCallback) {
   run.summary = input.summary;
   run.startedAt = run.startedAt ?? new Date().toISOString();
   run.finishedAt = new Date().toISOString();
+  run.goalSpec = input.goalSpec ?? run.goalSpec;
+  run.verifierResult = input.verifierResult ?? run.verifierResult;
 
   for (const issue of input.issues ?? []) {
     addIssue(audit, {
@@ -1149,7 +1170,10 @@ export function completeWorkerRun(input: WorkerCompleteCallback) {
     persona: run.mode,
     success: input.success,
     status: run.status,
-    issueCount: input.issues?.length ?? 0
+    issueCount: input.issues?.length ?? 0,
+    verifierVerdict: run.verifierResult?.verdict ?? null,
+    metRequirements: run.verifierResult?.metRequirements.length ?? null,
+    missingRequirements: run.verifierResult?.missingRequirements.length ?? null
   });
   completeAuditIfReady(audit);
   finishJobForRun(audit, run);
@@ -1379,6 +1403,7 @@ function buildMarkdownReport(audit: AuditRecord, score: number, outcome: AuditOu
   const artifactLines = audit.artifacts.map((artifact) => formatArtifactReference(audit, artifact)).join("\n");
   const bugExport = audit.issues.map((issue, index) => formatBugExport(audit, issue, index + 1)).join("\n\n");
   const comparison = formatPersonaComparison(audit);
+  const verification = formatEvidenceVerification(audit);
   const limitations = formatReportLimitations(audit);
   const recommendations = formatProductRecommendations(audit);
 
@@ -1392,6 +1417,9 @@ Provider: ${audit.provider}
 Evidence: ${pluralize(stats.stepCount, "browser step")} across ${pluralize(stats.runCount, "persona")}; ${pluralize(stats.screenshotCount, "screenshot frame")}; ${pluralize(stats.artifactCount, "artifact")}.
 
 ${buildReportSummary(audit)}
+
+## Evidence verification
+${verification}
 
 ## Persona comparison
 ${comparison}
@@ -1444,12 +1472,23 @@ function buildGeneratedTest(audit: AuditRecord) {
       title: issue.title,
       category: issue.category,
       severity: issue.severity
-    }))
+    })),
+    verifiedEvidence: collectVerifiedEvidence(audit)
   });
 }
 
 function collectStepEvidence(audit: AuditRecord): StepEvidence[] {
   return audit.runs.flatMap((run) => (run.steps ?? []).map((step) => ({ run, step })));
+}
+
+function collectVerifiedEvidence(audit: AuditRecord) {
+  return audit.runs
+    .flatMap((run) => run.verifierResult?.metRequirements ?? [])
+    .flatMap((requirement) => requirement.evidence)
+    .map((item) => safeLine(item, 140))
+    .filter(Boolean)
+    .filter((item, index, all) => all.indexOf(item) === index)
+    .slice(0, 8);
 }
 
 function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
@@ -1461,6 +1500,9 @@ function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
     failedRunCount: audit.runs.filter((run) => run.status === "FAILED").length,
     blockedRunCount: audit.runs.filter((run) => run.status === "BLOCKED").length,
     timedOutRunCount: audit.runs.filter((run) => run.status === "TIMED_OUT").length,
+    verifierSucceededRunCount: audit.runs.filter((run) => run.verifierResult?.verdict === "SUCCEEDED").length,
+    verifierPartialRunCount: audit.runs.filter((run) => run.verifierResult?.verdict === "PARTIAL").length,
+    verifierMissingRunCount: audit.runs.filter((run) => run.status === "SUCCEEDED" && run.verifierResult?.verdict !== "SUCCEEDED").length,
     stepCount: stepEvidence.length,
     issueCount: audit.issues.length,
     artifactCount: audit.artifacts.length,
@@ -1475,6 +1517,9 @@ function findingClause(stats: EvidenceStats) {
   if (!stats.issueCount) {
     if (stats.timedOutRunCount > 0) {
       return `timed out for ${stats.timedOutRunCount} of ${stats.runCount || 0} personas but preserved partial evidence`;
+    }
+    if (stats.verifierMissingRunCount > 0 || (stats.runCount > 0 && stats.verifierSucceededRunCount === 0)) {
+      return `did not record verifier-met required evidence; ${stats.succeededRunCount} of ${stats.runCount || 0} personas reported completion but still need evidence review`;
     }
     return `did not find a blocking issue; ${stats.succeededRunCount} of ${stats.runCount || 0} personas completed cleanly`;
   }
@@ -1530,10 +1575,33 @@ function externalStopReason(audit: AuditRecord) {
   return `Product friction: SwarmProof collected ${pluralize(stats.stepCount, "evidence step")} and found goal-relevant friction, led by "${issue.title}".`;
 }
 
+function formatEvidenceVerification(audit: AuditRecord) {
+  if (audit.runs.length === 0) {
+    return "- No verifier results are available yet.";
+  }
+
+  return audit.runs.map((run) => {
+    const verifier = run.verifierResult;
+    if (!verifier) {
+      return `- ${run.persona}: no verifier result was recorded, so this run cannot count as a clean pass.`;
+    }
+
+    const met = verifier.metRequirements.map((item) => item.label).join(", ") || "none";
+    const missing = verifier.missingRequirements.map((item) => item.label).join(", ") || "none";
+    const support = verifier.supportingStepIds.length > 0 ? verifier.supportingStepIds.join(", ") : "no linked step ids";
+    const safety = verifier.safetyFailures.length > 0 ? ` Safety failures: ${safeLine(verifier.safetyFailures.join("; "), 220)}` : "";
+    return `- ${run.persona}: ${verifier.verdict} at ${Math.round(verifier.confidence * 100)}% confidence. Met: ${met}. Missing: ${missing}. Supporting steps: ${support}.${safety}`;
+  }).join("\n");
+}
+
 function formatRunEvidence(audit: AuditRecord, run: AuditRunSummary) {
   const persona = personaProfileForMode(run.mode);
   const stopReason = stopReasonForRun(audit, run);
   const steps = (run.steps ?? []).slice(0, 8).map((step) => formatStepEvidence(audit, { run, step })).join("\n");
+  const verifier = run.verifierResult;
+  const evidenceCoverage = verifier
+    ? `${verifier.verdict}; met ${verifier.metRequirements.map((item) => item.label).join(", ") || "none"}; missing ${verifier.missingRequirements.map((item) => item.label).join(", ") || "none"}`
+    : "No verifier result recorded; cannot count as a clean pass.";
   return `### ${run.persona}
 - Mode: ${run.mode}
 - Viewport: ${run.viewport ?? "default"}
@@ -1542,6 +1610,7 @@ function formatRunEvidence(audit: AuditRecord, run: AuditRunSummary) {
 - Decision bias: ${safeLine(persona.decisionBiases.slice(0, 2).join("; "))}
 - Likely friction watched: ${safeLine(persona.likelyFrictions.slice(0, 2).join("; "))}
 - Result: ${run.status} - ${safeLine(run.summary || "No run summary recorded.")}
+- Evidence coverage: ${safeLine(evidenceCoverage, 360)}
 - Stop reason: ${safeLine(stopReason)}
 - Evidence:
 ${steps || "  - No steps recorded."}`;
@@ -1659,10 +1728,25 @@ function formatStepEvidence(audit: AuditRecord, evidence: StepEvidence) {
   const location = displayStepLocation(audit, step.url);
   const at = location ? ` at ${location}` : "";
   const thought = step.thought ? ` Reasoning: ${safeLine(step.thought, 180)}` : "";
-  return `  - ${run.mode} step ${step.stepIndex}${status}: ${humanizeAction(step.action)} -> ${safeLine(step.result)}${at}${artifact}${thought}`;
+  const planner = step.planner ? ` Planner: ${safeLine(step.planner.reason, 160)}` : "";
+  const verifier = step.verifier ? ` Verifier: ${step.verifier.verdict}; missing ${step.verifier.missingRequirements.map((item) => item.label).join(", ") || "none"}.` : "";
+  return `  - ${run.mode} step ${step.stepIndex}${status}: ${humanizeAction(step.action)} -> ${safeLine(step.result)}${at}${artifact}${thought}${planner}${verifier}`;
 }
 
 function stopReasonForRun(audit: AuditRecord, run: AuditRunSummary) {
+  if (run.verifierResult) {
+    if (run.verifierResult.verdict === "SUCCEEDED") {
+      return `Verifier met all required evidence: ${run.verifierResult.metRequirements.map((item) => item.label).join(", ")}.`;
+    }
+    if (run.verifierResult.safetyFailures.length > 0) {
+      return `Verifier blocked on safety: ${safeLine(run.verifierResult.safetyFailures.join("; "), 220)}`;
+    }
+    if (run.verifierResult.missingRequirements.length > 0) {
+      return `Verifier missing required evidence: ${run.verifierResult.missingRequirements.map((item) => item.label).join(", ")}.`;
+    }
+    return `Verifier verdict: ${run.verifierResult.verdict}.`;
+  }
+
   const stepStop = [...(run.steps ?? [])]
     .reverse()
     .map((step) => /Stop reason:\s*([^.;]+(?:[.;]|$))/i.exec(`${step.result} ${step.thought ?? ""}`)?.[1])
@@ -1709,6 +1793,8 @@ function buildAiReportPrompt(audit: AuditRecord) {
       profile: personaProfileForMode(run.mode),
       status: run.status,
       summary: safeLine(run.summary, 300),
+      goalSpec: run.goalSpec,
+      verifierResult: run.verifierResult,
       stopReason: stopReasonForRun(audit, run),
       steps: (run.steps ?? []).map((step) => ({
         id: step.id,
@@ -1974,6 +2060,87 @@ function toSummary(audit: AuditRecord): AuditSummary {
     eventCount: audit.eventCount,
     createdAt: audit.createdAt,
     updatedAt: audit.updatedAt
+  };
+}
+
+function toPublicSummary(audit: AuditRecord): AuditSummary {
+  const summary = toSummary(audit);
+  const publicGeneratedTest = buildPublicGeneratedTest(summary);
+  const publicRuns = summary.runs.map((run) => ({
+    ...run,
+    verifierResult: run.verifierResult ? publicVerifierResult(run.verifierResult) : undefined,
+    goalSpec: run.goalSpec,
+    steps: (run.steps ?? []).map((step) => ({
+      ...step,
+      observation: undefined,
+      planner: undefined,
+      verifier: step.verifier ? publicVerifierResult(step.verifier) : undefined,
+      goalSpec: undefined
+    }))
+  }));
+  const publicReport = summary.report ? {
+    ...summary.report,
+    markdown: sanitizePublicMarkdown(summary.report.markdown.replace(summary.generatedTest, publicGeneratedTest)),
+    reportJson: {
+      ...summary.report.reportJson,
+      verifierResults: summary.report.reportJson.verifierResults?.map(publicVerifierResult),
+      playwrightTests: summary.report.reportJson.playwrightTests.map((playwrightTest) => ({
+        ...playwrightTest,
+        code: publicGeneratedTest
+      }))
+    }
+  } : undefined;
+
+  return {
+    ...summary,
+    generatedTest: publicGeneratedTest,
+    runs: publicRuns,
+    report: publicReport
+  };
+}
+
+function sanitizePublicMarkdown(markdown: string) {
+  return markdown.replace(/ Planner: [^\n]+?(?= Verifier:|\n)/g, "");
+}
+
+function buildPublicGeneratedTest(summary: AuditSummary) {
+  const target = summary.preflight?.isDemoTarget ? "/demo-target" : summary.normalizedUrl ?? summary.targetUrl;
+  return buildEvidencePlaywrightTest({
+    name: "swarmproof generated smoke test",
+    targetUrl: target,
+    goal: summary.goal,
+    steps: summary.runs.flatMap((run) => (run.steps ?? []).map((step) => ({
+      stepIndex: step.stepIndex,
+      action: step.action,
+      result: step.result,
+      thought: step.thought,
+      url: step.url
+    }))),
+    issues: summary.issues.map((issue) => ({
+      title: issue.title,
+      category: issue.category,
+      severity: issue.severity
+    })),
+    verifiedEvidence: summary.runs
+      .flatMap((run) => run.verifierResult?.metRequirements ?? [])
+      .map((requirement) => requirement.label)
+      .filter((label, index, all) => all.indexOf(label) === index)
+  });
+}
+
+function publicVerifierResult(verifier: EvidenceVerifierSummary): EvidenceVerifierSummary {
+  return {
+    ...verifier,
+    metRequirements: verifier.metRequirements.map((requirement) => ({
+      ...requirement,
+      evidence: []
+    })),
+    missingRequirements: verifier.missingRequirements.map((requirement) => ({
+      ...requirement,
+      evidence: []
+    })),
+    supportingStepIds: [],
+    safetyFailures: verifier.safetyFailures.map((failure) => safeLine(failure, 140))
   };
 }
 
