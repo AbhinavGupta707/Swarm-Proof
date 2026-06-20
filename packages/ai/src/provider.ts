@@ -18,8 +18,10 @@ export function createAiProvider(): AiProvider {
             "content-type": "application/json"
           },
           body: JSON.stringify({
-            model: process.env.FIREWORKS_MODEL ?? "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            model: process.env.FIREWORKS_MODEL ?? "accounts/fireworks/models/deepseek-v3p1",
             response_format: { type: "json_object" },
+            temperature: 0.2,
+            max_tokens: 1200,
             messages: [
               { role: "system", content: system },
               { role: "user", content: prompt }
