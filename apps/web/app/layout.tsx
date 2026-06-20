@@ -21,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     o[m]=o[m]||function(){o._q[m===v[0]?'unshift':'push']([m].concat([].slice.call(arguments,0)));};})(v[w]);
     y=e.createElement(n);y.async=!0;y.src='https://cdn.pendo.io/agent/static/'+apiKey+'/pendo.js';
     z=e.getElementsByTagName(n)[0];z.parentNode.insertBefore(y,z);})(window,document,'script','pendo');
-})('67341432-e8c7-4740-9f14-1832759c9119');`}
+})('dfdb8ed9-48ed-401d-8962-e4b4bb0fb38a');`}
         </Script>
         <PendoInitializer />
         <header className="sticky top-0 z-20 border-b border-line bg-panel/95 backdrop-blur">
