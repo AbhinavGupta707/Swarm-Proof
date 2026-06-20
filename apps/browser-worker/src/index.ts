@@ -224,8 +224,8 @@ function workerTimeoutMs(input: WorkerRunAgentRequest) {
 }
 
 function workerConcurrency() {
-  const requested = Number(process.env.WORKER_CONCURRENCY ?? 3);
-  if (!Number.isFinite(requested)) return 3;
+  const requested = Number(process.env.WORKER_CONCURRENCY ?? 1);
+  if (!Number.isFinite(requested)) return 1;
   return Math.max(1, Math.min(3, Math.floor(requested)));
 }
 

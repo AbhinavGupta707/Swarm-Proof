@@ -27,7 +27,7 @@ NEXT_PUBLIC_APP_URL=http://127.0.0.1:3000 pnpm dev
 Start the worker in another shell:
 
 ```bash
-BROWSER_PROVIDER=local-playwright WORKER_CONCURRENCY=3 PORT=8787 pnpm worker:dev
+BROWSER_PROVIDER=local-playwright WORKER_CONCURRENCY=1 PORT=8787 pnpm worker:dev
 ```
 
 Run the web app with dispatch enabled:
@@ -41,7 +41,7 @@ BROWSER_WORKER_URL=http://127.0.0.1:8787 BROWSER_PROVIDER=local-playwright NEXT_
 - `BROWSER_WORKER_URL` absent: `/api/audits/:id/run` uses the deterministic in-process runner.
 - Worker healthy but not `local-playwright`: web falls back to deterministic mode.
 - Worker `local-playwright`: web prepares running jobs, dispatches each persona, and stores callbacks.
-- `WORKER_CONCURRENCY` defaults to `3` and is clamped between `1` and `3`, so the normal, mobile, and chaos personas can run in parallel without unbounded browser fan-out.
+- `WORKER_CONCURRENCY` defaults to `1` and is clamped between `1` and `3`. Keep Railway/Hobby deployments at `1` because each Playwright persona starts Chromium; use `2` or `3` only after upgrading worker memory.
 - Web watchdogs use `SWARMPROOF_PERSONA_TIMEOUT_MS` while worker requests use a 10 second shorter timeout, giving the worker's terminal callback a chance to land before the web app creates a watchdog fallback report.
 - Browser launch failure: worker posts a warning step and falls back to deterministic callbacks.
 
