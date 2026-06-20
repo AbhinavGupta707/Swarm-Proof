@@ -17,7 +17,15 @@ import type {
   BrowserStepSummary,
   RunStatus
 } from "@swarmproof/types";
-import { auditMetrics, auditPreflightLabel, auditSuccessRate, auditTimeline, auditTimeToValue } from "@/lib/audit-presenters";
+import {
+  auditMetrics,
+  auditPreflightLabel,
+  auditSuccessRate,
+  auditTimeline,
+  auditTimeToValue,
+  technicalArtifactsForAudit,
+  userFacingIssuesForAudit
+} from "@/lib/audit-presenters";
 
 type EventPayload = {
   events: AuditEventSummary[];
@@ -73,11 +81,14 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
   const [eventCount, setEventCount] = useState(initialEventCount || initialAudit.eventCount || 0);
   const [pollError, setPollError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(initialAudit.updatedAt ?? "");
+  const [openingReport, setOpeningReport] = useState(false);
 
   const hasActiveRun = audit.status === "RUNNING" || audit.runs.some((run) => run.status === "RUNNING" || run.status === "PENDING");
   const timedOutRuns = audit.runs.filter((run) => run.status === "TIMED_OUT").length;
   const crashedRuns = audit.issues.filter((issue) => issue.category === "Worker crash").length;
   const partialReady = !hasActiveRun && audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
+  const userIssues = useMemo(() => userFacingIssuesForAudit(audit), [audit]);
+  const technicalArtifacts = useMemo(() => technicalArtifactsForAudit(audit), [audit]);
   const timeline = useMemo(() => auditTimeline(audit), [audit]);
   const metrics = useMemo(() => auditMetrics({ ...audit, eventCount }), [audit, eventCount]);
   const modeLabel = auditPreflightLabel(audit);
@@ -160,12 +171,25 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
             </div>
           </div>
           <div className="flex flex-wrap gap-3">
-            <button className="inline-flex min-h-11 items-center gap-2 rounded-ui border border-line bg-panel px-4 py-3 font-semibold opacity-60" type="button" disabled>
-              <CircleStop className="h-4 w-4" aria-hidden="true" />
-              Stop
-            </button>
-            <Link className="inline-flex min-h-11 items-center rounded-ui bg-emerald px-4 py-3 font-semibold text-white hover:bg-emerald/90" href={`/audits/${audit.id}/report`}>
-              {partialReady ? "Open partial report" : "Open report"}
+            {hasActiveRun ? (
+              <button
+                className="inline-flex min-h-11 items-center gap-2 rounded-ui border border-line bg-panel px-4 py-3 font-semibold opacity-60"
+                type="button"
+                disabled
+                title="Manual cancellation is reserved for a future worker-control pass."
+              >
+                <CircleStop className="h-4 w-4" aria-hidden="true" />
+                Stop
+              </button>
+            ) : null}
+            <Link
+              className="inline-flex min-h-11 items-center gap-2 rounded-ui bg-emerald px-4 py-3 font-semibold text-white hover:bg-emerald/90"
+              href={`/audits/${audit.id}/report`}
+              aria-busy={openingReport}
+              onClick={() => setOpeningReport(true)}
+            >
+              {openingReport ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : null}
+              {openingReport ? "Opening report..." : partialReady ? "Open partial report" : "Open report"}
             </Link>
           </div>
         </div>
@@ -183,6 +207,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
         <section className="mt-6 grid gap-4 lg:grid-cols-3">
           {(audit.runs.length ? audit.runs : placeholderRuns()).map((run) => {
             const latestStep = run.steps?.at(-1);
+            const missingEvidence = run.verifierResult?.missingRequirements.map((item) => item.label).filter(Boolean) ?? [];
             return (
               <article key={run.id} className="rounded-ui border border-line bg-panel p-5 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
@@ -202,6 +227,11 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
                   )}
                 </div>
                 <p className="mt-4 min-h-12 text-sm leading-6 text-slate-700">{run.summary || summaryForRun(run.status)}</p>
+                <p className="mt-3 rounded-ui bg-mist px-3 py-2 text-xs leading-5 text-slate-600">
+                  <span className="font-semibold text-slate-900">Verifier:</span>{" "}
+                  {run.verifierResult ? run.verifierResult.verdict : hasActiveRun ? "pending" : "not recorded"}
+                  {run.verifierResult ? ` · Missing: ${missingEvidence.length ? missingEvidence.slice(0, 2).join(", ") : "none"}` : ""}
+                </p>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Link className="inline-flex min-h-11 items-center rounded-ui border border-line px-3 py-2 text-sm font-semibold hover:bg-mist" href={`/audits/${audit.id}/replay/${run.id}`}>
                     View replay
@@ -258,14 +288,15 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
               <Zap className="h-4 w-4" aria-hidden="true" />
               Live summary
             </p>
-            <h2 className="mt-3 text-2xl font-semibold">{audit.issues.length} issues found while the goal was in progress.</h2>
+            <h2 className="mt-3 text-2xl font-semibold">{liveSummaryTitle({ hasActiveRun, partialReady, userIssueCount: userIssues.length, technicalArtifactCount: technicalArtifacts.length })}</h2>
             <p className="mt-3 text-sm leading-6 text-slate-300">
-              {hasActiveRun ? "The report will update as callbacks arrive from the active run." : partialReady ? "The partial report, generated test, and share link are ready; failed personas can be retried after the worker is healthy." : "The report, generated test, and share link are ready to inspect for this run."}
+              {liveSummaryBody({ hasActiveRun, partialReady, userIssueCount: userIssues.length, technicalArtifactCount: technicalArtifacts.length })}
             </p>
             <div className="mt-5 grid gap-3 text-sm">
               <p className="flex items-center gap-2"><Clock3 className="h-4 w-4 text-emerald" aria-hidden="true" /> {auditTimeToValue(audit)}</p>
-              <p className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber" aria-hidden="true" /> {auditSuccessRate(audit)}</p>
-              <p className="flex items-center gap-2"><RefreshCw className="h-4 w-4 text-indigo" aria-hidden="true" /> {eventCount} safe events</p>
+              <p className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber" aria-hidden="true" /> {userIssues.length} user-facing blocker{userIssues.length === 1 ? "" : "s"}</p>
+              <p className="flex items-center gap-2"><RefreshCw className="h-4 w-4 text-indigo" aria-hidden="true" /> {technicalArtifacts.length} technical artifact{technicalArtifacts.length === 1 ? "" : "s"} · {eventCount} safe events</p>
+              <p className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald" aria-hidden="true" /> {auditSuccessRate(audit)}</p>
             </div>
           </aside>
         </section>
@@ -321,6 +352,47 @@ function headingForAudit(hasActiveRun: boolean, partialReady: boolean, timedOutR
   if (crashedRuns > 0) return "Partial report ready after worker crash.";
   if (partialReady) return "Partial report ready.";
   return "Audit run settled cleanly.";
+}
+
+function liveSummaryTitle({
+  hasActiveRun,
+  partialReady,
+  userIssueCount,
+  technicalArtifactCount
+}: {
+  hasActiveRun: boolean;
+  partialReady: boolean;
+  userIssueCount: number;
+  technicalArtifactCount: number;
+}) {
+  if (hasActiveRun) {
+    if (userIssueCount > 0) return `${userIssueCount} user-facing blocker${userIssueCount === 1 ? "" : "s"} found so far.`;
+    if (technicalArtifactCount > 0) return `No user blocker yet; ${technicalArtifactCount} technical artifact${technicalArtifactCount === 1 ? "" : "s"} recorded.`;
+    return "Personas are collecting evidence.";
+  }
+
+  if (partialReady) return "Partial report is ready to inspect.";
+  if (userIssueCount > 0) return `${userIssueCount} user-facing blocker${userIssueCount === 1 ? "" : "s"} found.`;
+  if (technicalArtifactCount > 0) return "Goal verified with technical artifacts.";
+  return "Goal verified with no blockers.";
+}
+
+function liveSummaryBody({
+  hasActiveRun,
+  partialReady,
+  userIssueCount,
+  technicalArtifactCount
+}: {
+  hasActiveRun: boolean;
+  partialReady: boolean;
+  userIssueCount: number;
+  technicalArtifactCount: number;
+}) {
+  if (hasActiveRun) return "This panel updates as each persona sends safe, sanitized callbacks.";
+  if (partialReady) return "Some personas stopped early, timed out, or were blocked; the available evidence has been preserved.";
+  if (userIssueCount > 0) return "Open the report to see which persona hit each blocker and what evidence supports it.";
+  if (technicalArtifactCount > 0) return "The personas reached the goal; console or network artifacts are retained separately for engineering follow-up.";
+  return "The report, generated test, and share link are ready to inspect for this run.";
 }
 
 function formatTime(value: string) {

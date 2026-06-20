@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Eye, FileCode2, LockKeyhole, ShieldCheck } from "lucide-react";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
-import { auditMetrics } from "@/lib/audit-presenters";
+import { auditMetrics, technicalArtifactsForAudit, userFacingIssuesForAudit } from "@/lib/audit-presenters";
 import { getSharedAuditForPage } from "@/lib/audit-data";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +12,10 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
   const audit = await getSharedAuditForPage(shareToken);
   const metrics = auditMetrics(audit);
   const partial = audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
+  const userIssues = userFacingIssuesForAudit(audit);
+  const technicalArtifacts = technicalArtifactsForAudit(audit);
+  const sharePath = `/share/${shareToken}`;
+  const shareUrl = process.env.NEXT_PUBLIC_APP_URL ? new URL(sharePath, process.env.NEXT_PUBLIC_APP_URL).toString() : sharePath;
 
   return (
     <main className="section">
@@ -52,31 +56,57 @@ export default async function SharePage({ params }: { params: Promise<{ shareTok
           ))}
         </section>
 
-        <section className="mt-6 grid gap-4 lg:grid-cols-[1fr_0.85fr]">
-          <div className="rounded-ui border border-line bg-panel p-5">
+        <section className="mt-6 rounded-ui border border-line bg-panel p-5">
+          <h2 className="text-lg font-semibold">Share link</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-700">
+            Share this read-only report URL with teammates, judges, or reviewers. It contains sanitized summaries, not credentials, raw target content, or private URLs.
+          </p>
+          <p className="mt-3 break-all rounded-ui bg-mist p-3 font-mono text-sm text-slate-700">{shareUrl}</p>
+        </section>
+
+        <section className="mt-6 grid min-w-0 gap-4 xl:grid-cols-[minmax(20rem,0.75fr)_minmax(0,1.25fr)]">
+          <div className="min-w-0 rounded-ui border border-line bg-panel p-5">
             <h2 className="flex items-center gap-2 text-lg font-semibold">
               <Eye className="h-5 w-5 text-indigo" aria-hidden="true" />
               Public findings
             </h2>
             <div className="mt-4 grid gap-4">
-              {audit.issues.map((issue) => (
+              {userIssues.length ? userIssues.map((issue) => (
                 <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
                   <p className="font-mono text-xs font-semibold text-crimson">{issue.severity} · {issue.category}</p>
                   <h3 className="mt-2 text-lg font-semibold">{issue.title}</h3>
                   <p className="mt-2 text-sm leading-6 text-slate-700">{issue.description}</p>
                 </article>
-              ))}
+              )) : (
+                <p className="rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
+                  No user-facing blocker was found in this shared audit.
+                </p>
+              )}
             </div>
+            {technicalArtifacts.length ? (
+              <div className="mt-6 border-t border-line pt-5">
+                <h3 className="text-base font-semibold">Technical artifacts</h3>
+                <div className="mt-4 grid gap-4">
+                  {technicalArtifacts.map((issue) => (
+                    <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
+                      <p className="font-mono text-xs font-semibold text-slate-500">{issue.severity} · {issue.category}</p>
+                      <h4 className="mt-2 font-semibold">{issue.title}</h4>
+                      <p className="mt-2 text-sm leading-6 text-slate-700">{issue.description}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
-          <aside className="grid content-start gap-4">
-            <section className="rounded-ui border border-line bg-panel p-5">
+          <aside className="grid min-w-0 content-start gap-4">
+            <section className="min-w-0 rounded-ui border border-line bg-panel p-5">
               <h2 className="flex items-center gap-2 text-lg font-semibold">
                 <FileCode2 className="h-5 w-5 text-indigo" aria-hidden="true" />
                 Generated test preview
               </h2>
-              <pre className="mt-4 max-h-80 overflow-x-auto rounded-ui bg-ink p-4 text-sm leading-6 text-white">
-                <code>{audit.generatedTest}</code>
+              <pre className="mt-4 max-h-[30rem] max-w-full overflow-auto whitespace-pre rounded-ui bg-ink p-4 text-sm leading-6 text-white">
+                <code className="block min-w-max">{audit.generatedTest}</code>
               </pre>
             </section>
             <section className="rounded-ui border border-line bg-panel p-5">

@@ -44,7 +44,10 @@ type EvidenceStats = {
   screenshotCount: number;
   warningStepCount: number;
   failedStepCount: number;
+  userIssueCount: number;
+  technicalArtifactCount: number;
   topIssue?: AuditIssueSummary;
+  topUserIssue?: AuditIssueSummary;
 };
 type AiReportDraft = {
   summary?: string;
@@ -701,11 +704,11 @@ export function preflightTargetUrl(targetUrl: string, baseUrl: string): Prefligh
 
   let parsed: URL;
   try {
-    parsed = new URL(rawTarget);
+    parsed = new URL(normalizeSubmittedTarget(rawTarget));
   } catch {
     return {
       loadable: false,
-      blockedReason: "Enter an absolute http(s) URL or use the built-in /demo-target.",
+      blockedReason: "Enter a public URL such as apple.com, https://apple.com, or use the built-in /demo-target.",
       normalizedUrl: rawTarget,
       isDemoTarget: false
     };
@@ -734,6 +737,18 @@ export function preflightTargetUrl(targetUrl: string, baseUrl: string): Prefligh
   }
 
   return { loadable: true, normalizedUrl: parsed.toString(), isDemoTarget };
+}
+
+function normalizeSubmittedTarget(rawTarget: string) {
+  if (rawTarget.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(rawTarget)) {
+    return rawTarget;
+  }
+
+  if (/^\S+$/.test(rawTarget)) {
+    return `https://${rawTarget}`;
+  }
+
+  return rawTarget;
 }
 
 export function createAudit(input: {
@@ -943,9 +958,10 @@ export function generateAuditReport(auditId: string) {
   const hasPartialRun = audit.runs.some((run) => FINAL_RUN_STATUSES.includes(run.status) && run.status !== "SUCCEEDED");
   const hasUnfinishedRun = audit.runs.some((run) => !FINAL_RUN_STATUSES.includes(run.status));
   const verifierCleanPass = audit.runs.length > 0 && audit.runs.every((run) => run.status === "SUCCEEDED" && run.verifierResult?.verdict === "SUCCEEDED");
-  const outcome: AuditOutcomeValue = audit.issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
+  const userIssues = userFacingIssueList(audit);
+  const outcome: AuditOutcomeValue = userIssues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL")
     ? "fail"
-    : audit.issues.length > 0 || hasPartialRun || hasUnfinishedRun || !verifierCleanPass
+    : userIssues.length > 0 || hasPartialRun || hasUnfinishedRun || !verifierCleanPass
       ? "partial"
       : "pass";
   const score = calculateScore(audit);
@@ -1390,6 +1406,10 @@ function buildReportSummary(audit: AuditRecord) {
       return stopReason;
     }
 
+    if (stats.userIssueCount === 0 && stats.technicalArtifactCount > 0 && stats.succeededRunCount === stats.runCount && stats.verifierMissingRunCount === 0) {
+      return `SwarmProof verified the public goal across ${pluralize(stats.runCount, "persona")} with ${pluralize(stats.stepCount, "evidence step")}. No user-facing blocker was found; ${pluralize(stats.technicalArtifactCount, "technical artifact")} was recorded for engineering follow-up.`;
+    }
+
     if (audit.provider === "local-playwright") {
       return `The local Playwright worker collected an evidence-backed trace with ${pluralize(stats.stepCount, "step")} across ${pluralize(stats.runCount, "persona")} and ${findingClause(stats)}.`;
     }
@@ -1526,6 +1546,8 @@ function collectVerifiedEvidence(audit: AuditRecord) {
 
 function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
   const stepEvidence = collectStepEvidence(audit);
+  const userIssues = userFacingIssueList(audit);
+  const technicalArtifacts = technicalArtifactList(audit);
   return {
     runCount: audit.runs.length,
     completedRunCount: audit.runs.filter((run) => FINAL_RUN_STATUSES.includes(run.status)).length,
@@ -1542,23 +1564,41 @@ function collectEvidenceStats(audit: AuditRecord): EvidenceStats {
     screenshotCount: stepEvidence.filter(({ step }) => Boolean(step.artifactId || step.screenshotUrl)).length,
     warningStepCount: stepEvidence.filter(({ step }) => step.status === "warning").length,
     failedStepCount: stepEvidence.filter(({ step }) => step.status === "failed").length,
-    topIssue: [...audit.issues].sort((left, right) => severityRank(right.severity) - severityRank(left.severity))[0]
+    userIssueCount: userIssues.length,
+    technicalArtifactCount: technicalArtifacts.length,
+    topIssue: [...audit.issues].sort((left, right) => severityRank(right.severity) - severityRank(left.severity))[0],
+    topUserIssue: [...userIssues].sort((left, right) => severityRank(right.severity) - severityRank(left.severity))[0]
   };
 }
 
 function findingClause(stats: EvidenceStats) {
-  if (!stats.issueCount) {
+  if (!stats.userIssueCount) {
     if (stats.timedOutRunCount > 0) {
       return `timed out for ${stats.timedOutRunCount} of ${stats.runCount || 0} personas but preserved partial evidence`;
     }
     if (stats.verifierMissingRunCount > 0 || (stats.runCount > 0 && stats.verifierSucceededRunCount === 0)) {
       return `did not record verifier-met required evidence; ${stats.succeededRunCount} of ${stats.runCount || 0} personas reported completion but still need evidence review`;
     }
+    if (stats.technicalArtifactCount > 0) {
+      return `did not find a user-facing blocker; ${stats.succeededRunCount} of ${stats.runCount || 0} personas completed cleanly, with ${pluralize(stats.technicalArtifactCount, "technical artifact")} recorded`;
+    }
     return `did not find a blocking issue; ${stats.succeededRunCount} of ${stats.runCount || 0} personas completed cleanly`;
   }
 
-  const topIssue = stats.topIssue ? `, led by "${stats.topIssue.title}"` : "";
-  return `found ${pluralize(stats.issueCount, "issue")}${topIssue}`;
+  const topIssue = stats.topUserIssue ? `, led by "${stats.topUserIssue.title}"` : "";
+  return `found ${pluralize(stats.userIssueCount, "user-facing issue")}${topIssue}`;
+}
+
+function isTechnicalArtifactIssue(issue: Pick<AuditIssueSummary, "category">) {
+  return issue.category === "Console" || issue.category === "Network";
+}
+
+function userFacingIssueList(audit: AuditRecord) {
+  return audit.issues.filter((issue) => !isTechnicalArtifactIssue(issue));
+}
+
+function technicalArtifactList(audit: AuditRecord) {
+  return audit.issues.filter(isTechnicalArtifactIssue);
 }
 
 function externalStopReason(audit: AuditRecord) {
@@ -1688,17 +1728,27 @@ function formatReportLimitations(audit: AuditRecord) {
 }
 
 function formatProductRecommendations(audit: AuditRecord) {
-  if (audit.issues.length === 0) {
+  const userIssues = userFacingIssueList(audit);
+  const technicalArtifacts = technicalArtifactList(audit);
+
+  if (userIssues.length === 0 && technicalArtifacts.length === 0) {
     return "- Keep the public path observable before account creation, and add a regression check around the evidence steps SwarmProof reached.";
   }
 
-  return audit.issues.slice(0, 5).map((issue) => {
+  if (userIssues.length === 0) {
+    return `- No user-facing product blocker was found. Review ${pluralize(technicalArtifacts.length, "technical artifact")} separately and keep the generated Playwright starter as a regression smoke check.`;
+  }
+
+  return userIssues.slice(0, 5).map((issue) => {
     return `- ${issue.title}: ${safeLine(issue.suggestedFix ?? implementationHintForIssue(issue), 220)}`;
   }).join("\n");
 }
 
 function buildActionPlan(audit: AuditRecord, outcome: AuditOutcomeValue): AuditActionPlanSummary {
-  const issueItems = audit.issues.slice(0, 4).map((issue): AuditActionPlanItem => ({
+  const userIssues = userFacingIssueList(audit);
+  const technicalArtifacts = technicalArtifactList(audit);
+  const actionableIssues = userIssues.length > 0 ? userIssues : technicalArtifacts;
+  const issueItems = actionableIssues.slice(0, 4).map((issue): AuditActionPlanItem => ({
     title: issue.category === "Goal drift" ? "Keep the agent path anchored to the requested product" : issue.title,
     priority: priorityForIssue(issue),
     owner: ownerForIssue(issue),
@@ -1741,7 +1791,7 @@ function buildActionPlan(audit: AuditRecord, outcome: AuditOutcomeValue): AuditA
   };
   const items = [...issueItems, ...verifierItems].length > 0 ? [...issueItems, ...verifierItems].slice(0, 5) : [fallbackItem];
   const title = outcome === "pass"
-    ? "Regression PR suggestion"
+    ? technicalArtifacts.length > 0 && userIssues.length === 0 ? "Technical follow-up PR suggestion" : "Regression PR suggestion"
     : audit.issues.some((issue) => issue.category === "Goal drift")
       ? "Goal-drift fix PR suggestion"
       : "Product-friction PR suggestion";
@@ -2137,6 +2187,7 @@ function implementationHintForIssue(issue: AuditIssueSummary) {
 
 function calculateScore(audit: AuditRecord) {
   const penalty = audit.issues.reduce((total, issue) => {
+    if (isTechnicalArtifactIssue(issue)) return total + 3;
     if (issue.severity === "CRITICAL") return total + 35;
     if (issue.severity === "HIGH") return total + 24;
     if (issue.severity === "MEDIUM") return total + 14;

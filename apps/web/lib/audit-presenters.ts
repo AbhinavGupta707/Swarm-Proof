@@ -1,4 +1,4 @@
-import type { AuditSummary, BrowserStepSummary, RunStatus } from "@swarmproof/types";
+import type { AuditIssueSummary, AuditSummary, BrowserStepSummary, RunStatus } from "@swarmproof/types";
 import { demoAudit, type DemoStep } from "./demo-data";
 
 type UiStepStatus = "passed" | "warning" | "failed";
@@ -32,12 +32,26 @@ export function auditMetrics(audit: AuditSummary): AuditMetric[] {
   }
 
   const stepCount = audit.runs.reduce((total, run) => total + (run.steps?.length ?? 0), 0);
+  const userIssues = userFacingIssuesForAudit(audit);
+  const technicalArtifacts = technicalArtifactsForAudit(audit);
   return [
     { label: "Personas", value: String(audit.runs.length || 3), detail: audit.runs.map((run) => run.mode).join(", ") || "normal, mobile, chaos" },
     { label: "Evidence frames", value: String(stepCount), detail: "Worker and deterministic screenshots" },
-    { label: "Issues found", value: String(audit.issues.length), detail: severityBreakdown(audit) },
+    { label: "Findings", value: String(userIssues.length + technicalArtifacts.length), detail: findingsBreakdown(userIssues, technicalArtifacts) },
     { label: "Safe events", value: String(audit.eventCount ?? 0), detail: "Counts and states only" }
   ];
+}
+
+export function isTechnicalArtifact(issue: Pick<AuditIssueSummary, "category">) {
+  return issue.category === "Console" || issue.category === "Network";
+}
+
+export function userFacingIssuesForAudit(audit: AuditSummary) {
+  return audit.issues.filter((issue) => !isTechnicalArtifact(issue));
+}
+
+export function technicalArtifactsForAudit(audit: AuditSummary) {
+  return audit.issues.filter(isTechnicalArtifact);
 }
 
 export function auditTimeline(audit: AuditSummary): DemoStep[] {
@@ -160,10 +174,14 @@ export function auditTimeToValue(audit: AuditSummary) {
     return "Timed out with partial evidence";
   }
 
-  const firstIssueStep = audit.issues.flatMap((issue) => issue.evidenceStepIds ?? [])[0];
+  const firstIssueStep = userFacingIssuesForAudit(audit).flatMap((issue) => issue.evidenceStepIds ?? [])[0];
   if (firstIssueStep) {
     const step = audit.runs.flatMap((run) => run.steps ?? []).find((candidate) => candidate.id === firstIssueStep);
     return step ? `Step ${step.stepIndex} first blocker` : "Issue evidence captured";
+  }
+
+  if (technicalArtifactsForAudit(audit).length > 0) {
+    return "No user blocker found";
   }
 
   return audit.completedAt ? "Run completed" : "No blocker found";
@@ -185,14 +203,14 @@ export function auditPreflightLabel(audit: AuditSummary) {
   return audit.normalizedUrl ? "Safety preflight passed" : "Demo fallback";
 }
 
-function severityBreakdown(audit: AuditSummary) {
-  if (!audit.issues.length) {
-    return "No issues yet";
+function findingsBreakdown(userIssues: AuditIssueSummary[], technicalArtifacts: AuditIssueSummary[]) {
+  if (!userIssues.length && !technicalArtifacts.length) {
+    return "No findings yet";
   }
 
-  const high = audit.issues.filter((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL").length;
-  const medium = audit.issues.filter((issue) => issue.severity === "MEDIUM").length;
-  return `${high} high, ${medium} medium`;
+  const high = userIssues.filter((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL").length;
+  const medium = userIssues.filter((issue) => issue.severity === "MEDIUM").length;
+  return `${high} high, ${medium} medium, ${technicalArtifacts.length} technical artifact${technicalArtifacts.length === 1 ? "" : "s"}`;
 }
 
 function humanizeAction(action: string) {

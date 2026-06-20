@@ -4,7 +4,16 @@ import { createShareAsync } from "@swarmproof/db";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
 import { BugReportDownloadLink } from "./bug-report-download";
-import { actionPlanMarkdownForAudit, auditPreflightLabel, auditSuccessRate, auditTimeToValue, bugReportForAudit, suggestedFixesForAudit } from "@/lib/audit-presenters";
+import {
+  actionPlanMarkdownForAudit,
+  auditPreflightLabel,
+  auditSuccessRate,
+  auditTimeToValue,
+  bugReportForAudit,
+  suggestedFixesForAudit,
+  technicalArtifactsForAudit,
+  userFacingIssuesForAudit
+} from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +40,8 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
   const actionPlan = report?.reportJson.actionPlan;
   const actionPlanMarkdown = actionPlanMarkdownForAudit(audit);
   const headline = reportHeadline(audit);
+  const userIssues = userFacingIssuesForAudit(audit);
+  const technicalArtifacts = technicalArtifactsForAudit(audit);
 
   return (
     <main className="section">
@@ -90,18 +101,26 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
           <div className="rounded-ui border border-line bg-panel p-5">
             <h2 className="text-lg font-semibold">Persona stories</h2>
             <div className="mt-4 grid gap-4">
-              {audit.runs.length ? audit.runs.map((run) => (
-                <div key={run.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-semibold">{run.persona}</p>
-                    <span className="font-mono text-xs text-slate-500">{run.status}</span>
+              {audit.runs.length ? audit.runs.map((run) => {
+                const missingEvidence = run.verifierResult?.missingRequirements.map((item) => item.label).filter(Boolean) ?? [];
+                return (
+                  <div key={run.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-semibold">{run.persona}</p>
+                      <span className="font-mono text-xs text-slate-500">{run.status}</span>
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">{run.summary}</p>
+                    <p className="mt-2 rounded-ui bg-mist px-3 py-2 text-xs leading-5 text-slate-600">
+                      <span className="font-semibold text-slate-900">Verifier:</span>{" "}
+                      {run.verifierResult ? run.verifierResult.verdict : "not recorded"}
+                      {run.verifierResult ? ` · Missing: ${missingEvidence.length ? missingEvidence.slice(0, 2).join(", ") : "none"}` : ""}
+                    </p>
+                    <Link className="mt-3 inline-flex min-h-11 items-center rounded-ui border border-line px-3 py-2 text-sm font-semibold hover:bg-mist" href={`/audits/${audit.id}/replay/${run.id}`}>
+                      Replay evidence
+                    </Link>
                   </div>
-                  <p className="mt-2 text-sm leading-6 text-slate-700">{run.summary}</p>
-                  <Link className="mt-3 inline-flex min-h-11 items-center rounded-ui border border-line px-3 py-2 text-sm font-semibold hover:bg-mist" href={`/audits/${audit.id}/replay/${run.id}`}>
-                    Replay evidence
-                  </Link>
-                </div>
-              )) : (
+                );
+              }) : (
                 <p className="rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
                   Waiting for persona runs to start.
                 </p>
@@ -110,9 +129,9 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
           </div>
 
           <div className="rounded-ui border border-line bg-panel p-5">
-            <h2 className="text-lg font-semibold">Friction points</h2>
+            <h2 className="text-lg font-semibold">User-facing findings</h2>
             <div className="mt-4 grid gap-4">
-              {audit.issues.length ? audit.issues.map((issue) => (
+              {userIssues.length ? userIssues.map((issue) => (
                 <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
                   <p className={`w-fit rounded-ui px-2 py-1 font-mono text-xs font-semibold ${severityStyles[issue.severity]}`}>
                     {issue.severity} · {issue.category}
@@ -123,10 +142,30 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                 </article>
               )) : (
                 <p className="rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
-                  No friction points have been recorded yet.
+                  No user-facing blocker was found. The personas reached verifier-backed evidence for the requested public path.
                 </p>
               )}
             </div>
+            {technicalArtifacts.length ? (
+              <div className="mt-6 border-t border-line pt-5">
+                <h3 className="text-base font-semibold">Technical artifacts</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  These are console or network signals from the target site. They are useful engineering follow-up, but they are not treated as user-flow blockers unless they stop the persona.
+                </p>
+                <div className="mt-4 grid gap-4">
+                  {technicalArtifacts.map((issue) => (
+                    <article key={issue.id} className="border-b border-line pb-4 last:border-b-0 last:pb-0">
+                      <p className={`w-fit rounded-ui px-2 py-1 font-mono text-xs font-semibold ${severityStyles[issue.severity]}`}>
+                        {issue.severity} · {issue.category}
+                      </p>
+                      <h4 className="mt-2 text-lg font-semibold">{issue.title}</h4>
+                      <p className="mt-2 text-sm leading-6 text-slate-700">{issue.description}</p>
+                      <p className="mt-3 text-sm font-semibold">Engineering follow-up: {issue.suggestedFix}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
 
@@ -202,7 +241,7 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
               </a>
               <p className="rounded-ui bg-mist p-3 text-sm leading-6 text-slate-600">
                 <AlertTriangle className="mr-1 inline h-4 w-4 text-indigo" aria-hidden="true" />
-                Event telemetry is privacy-safe: no private URLs, credentials, screenshots, or raw target-page text are sent to analytics.
+                Privacy note: screenshots and raw target-page text stay out of Novus/Pendo analytics events. This report shows sanitized evidence summaries for review.
               </p>
             </div>
           </div>
@@ -218,6 +257,7 @@ function reportHeadline(audit: Awaited<ReturnType<typeof getAuditForPage>>) {
   if (audit.issues.some((issue) => issue.category === "Worker crash")) return "Partial report ready after worker crash.";
   if (audit.runs.some((run) => run.status === "BLOCKED")) return "Safety-limited partial report ready.";
   if (audit.report?.outcome === "fail") return "Needs fixes before real traffic.";
+  if (audit.report?.outcome === "pass" && technicalArtifactsForAudit(audit).length > 0) return "Goal verified with technical artifacts.";
   if (audit.report?.outcome === "pass") return "Clean pass for this audit path.";
   return "Partial pass with product friction.";
 }

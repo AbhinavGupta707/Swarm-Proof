@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Bug, ClipboardCheck, FileCode2, Share2 } from "lucide-react";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
-import { bugReportForAudit } from "@/lib/audit-presenters";
+import { bugReportForAudit, userFacingIssuesForAudit } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +10,9 @@ export const dynamic = "force-dynamic";
 export default async function TestsPage({ params }: { params: Promise<{ auditId: string }> }) {
   const { auditId } = await params;
   const audit = await getAuditForPage(auditId);
+  const userIssues = userFacingIssuesForAudit(audit);
+  const hasIncompletePersona = audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
+  const hasUserFailure = userIssues.length > 0 || hasIncompletePersona;
 
   return (
     <main className="section">
@@ -25,9 +28,11 @@ export default async function TestsPage({ params }: { params: Promise<{ auditId:
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Generated test</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-normal">Turn the failed path into a regression check.</h1>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">
+              {hasUserFailure ? "Turn the observed blocker into a regression check." : "Save the verified path as a regression starter."}
+            </h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">
-              SwarmProof converts observed failures into a starter Playwright test plus a PM-readable bug export.
+              SwarmProof converts the browser evidence into a starter Playwright check plus a PM-readable export. Review selectors before committing it to the target app.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -41,18 +46,18 @@ export default async function TestsPage({ params }: { params: Promise<{ auditId:
           </div>
         </div>
 
-        <section className="mt-8 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="rounded-ui border border-line bg-ink p-5 text-white shadow-sm">
+        <section className="mt-8 grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+          <div className="min-w-0 rounded-ui border border-line bg-ink p-5 text-white shadow-sm">
             <div className="flex items-center gap-2">
               <FileCode2 className="h-5 w-5 text-emerald" aria-hidden="true" />
               <h2 className="text-lg font-semibold">Playwright starter check</h2>
             </div>
-            <pre className="mt-5 max-h-[34rem] overflow-x-auto text-sm leading-6 text-slate-100">
-              <code>{audit.generatedTest}</code>
+            <pre className="mt-5 max-h-[34rem] max-w-full overflow-auto whitespace-pre text-sm leading-6 text-slate-100">
+              <code className="block min-w-max">{audit.generatedTest}</code>
             </pre>
           </div>
 
-          <aside className="grid content-start gap-4">
+          <aside className="grid min-w-0 content-start gap-4">
             <section className="rounded-ui border border-line bg-panel p-5">
               <h2 className="flex items-center gap-2 text-lg font-semibold">
                 <ClipboardCheck className="h-5 w-5 text-indigo" aria-hidden="true" />
@@ -70,7 +75,7 @@ export default async function TestsPage({ params }: { params: Promise<{ auditId:
                 <Bug className="h-5 w-5 text-crimson" aria-hidden="true" />
                 Bug report export
               </h2>
-              <pre className="mt-4 whitespace-pre-wrap rounded-ui bg-mist p-4 text-sm leading-6 text-slate-700">
+              <pre className="mt-4 max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-ui bg-mist p-4 text-sm leading-6 text-slate-700">
                 {bugReportForAudit(audit)}
               </pre>
             </section>

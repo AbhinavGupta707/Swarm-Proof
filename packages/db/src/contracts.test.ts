@@ -96,6 +96,14 @@ test("URL safety blocks private and internal targets while allowing the demo tar
   const demo = preflightTargetUrl("/demo-target", baseUrl);
   assert.equal(demo.loadable, true);
   assert.equal(demo.isDemoTarget, true);
+
+  const hostOnly = preflightTargetUrl("apple.com", baseUrl);
+  assert.equal(hostOnly.loadable, true);
+  assert.equal(hostOnly.normalizedUrl, "https://apple.com/");
+
+  const hostPath = preflightTargetUrl("apple.com/macbook-air", baseUrl);
+  assert.equal(hostPath.loadable, true);
+  assert.equal(hostPath.normalizedUrl, "https://apple.com/macbook-air");
 });
 
 test("default audit run creates normal, mobile, and chaos personas", () => {
@@ -467,6 +475,69 @@ test("verifier result is required for a clean external pass", () => {
   assert.equal(clean.report?.outcome, "pass");
   assert.match(clean.generatedTest, /MacBook Air|Compare MacBook Air/i);
   assert.doesNotMatch(clean.generatedTest, /project|people|invite/i);
+});
+
+test("technical console and network artifacts do not turn a verified external path into product friction", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "apple.com",
+    goal: "Compare MacBook Air pricing and configuration choices.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const step = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "passed",
+    thought: "Open MacBook Air comparison evidence.",
+    result: "Observed MacBook Air pricing and configuration choices.",
+    url: "https://www.apple.com/mac/compare/",
+    verifier: successVerifier(["MacBook Air product identity", "Pricing or plan evidence", "Configuration or option evidence"])
+  });
+
+  const overview = completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Verifier confirmed the public path.",
+    verifierResult: successVerifier(["MacBook Air product identity", "Pricing or plan evidence", "Configuration or option evidence"]),
+    issues: [
+      {
+        severity: "LOW",
+        category: "Console",
+        title: "Console errors occurred during the run",
+        description: "1 browser console error was observed.",
+        evidenceStepIds: [step.id],
+        suggestedFix: "Review production console errors for the audited flow."
+      },
+      {
+        severity: "LOW",
+        category: "Network",
+        title: "Network failures occurred during the run",
+        description: "1 failed request was observed.",
+        evidenceStepIds: [step.id],
+        suggestedFix: "Review failing assets or API requests in the audited flow."
+      }
+    ]
+  });
+
+  assert.equal(overview.normalizedUrl, "https://apple.com/");
+  assert.equal(overview.report?.outcome, "pass");
+  assert.match(overview.report?.summary ?? "", /No user-facing blocker was found/);
+  assert.doesNotMatch(overview.report?.summary ?? "", /Product friction/);
+  assert.match(overview.report?.reportJson.actionPlan?.title ?? "", /Technical follow-up/);
 });
 
 test("goal drift produces PR-ready guidance and is excluded from generated regression tests", () => {
