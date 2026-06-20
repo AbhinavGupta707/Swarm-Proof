@@ -319,16 +319,20 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
 
     if (plan.type === "done") {
-      goalEvidenceReached = true;
+      const currentTitle = await safeTitleText(page);
+      const verifiedGoalEvidence = hasGoalEvidenceForExternalRun(input.goal, page.url(), currentTitle, history);
       await emitStep(input, postCallback, state, {
         stepIndex: offset + 2,
         action: "done",
-        status: "passed",
+        status: verifiedGoalEvidence ? "passed" : "warning",
         thought: formatPlanThought(plan),
-        result: `Planner found enough evidence to stop: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
+        result: verifiedGoalEvidence
+          ? `Planner found enough evidence to stop: ${plan.evidence} ${formatPlanResultSignal(plan)}`
+          : `Planner claimed enough evidence, but the current URL, title, and action trace did not verify the requested goal. Evidence claim: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
         page
       });
-      history.push(`Done: ${plan.evidence}`);
+      goalEvidenceReached = verifiedGoalEvidence;
+      history.push(`${verifiedGoalEvidence ? "Done" : "Unverified done"}: ${plan.evidence}`);
       break;
     }
 
@@ -423,7 +427,7 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   }
 
   addConsoleAndNetworkIssues(issues, state);
-  if (!goalEvidenceReached && actionsTaken > 0 && !issues.some((issue) => issue.category === "Auth-limited flow" || issue.category === "Safety stop")) {
+  if (!goalEvidenceReached && !issues.some((issue) => issue.category === "Auth-limited flow" || issue.category === "Safety stop" || issue.category === "Goal evidence")) {
     issues.push({
       severity: "LOW",
       category: "Goal evidence",
@@ -435,9 +439,10 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   }
   const authLimited = issues.some((issue) => issue.category === "Auth-limited flow");
   const missedGoal = issues.some((issue) => issue.category === "Goal evidence");
+  const succeeded = goalEvidenceReached && !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL");
   await complete(input, postCallback, state, {
-    success: goalEvidenceReached && !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL"),
-    status: authLimited || stoppedForSafety || missedGoal ? "BLOCKED" : "SUCCEEDED",
+    success: succeeded,
+    status: succeeded ? "SUCCEEDED" : "BLOCKED",
     summary: stoppedForSafety
       ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), then stopped before cart, checkout, payment, or private-data commitment.`
       : missedGoal
@@ -919,7 +924,8 @@ export function shouldFollowSafeHrefFallback(beforeUrl: string, afterUrl: string
 }
 
 export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: string, history: string[] = []) {
-  const haystack = `${url} ${title} ${history.join(" ")}`.toLowerCase();
+  const pageSignal = `${url} ${title}`.toLowerCase();
+  const haystack = `${pageSignal} ${history.join(" ")}`.toLowerCase();
   const hostTokens = hostTokensFor(url);
   const tokens = goal
     .toLowerCase()
@@ -943,7 +949,7 @@ export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: 
     return true;
   }
 
-  return [...normalizedMatches].some((token) => HIGH_INTENT_GOAL_TOKENS.has(token));
+  return matches.some((token) => HIGH_INTENT_GOAL_TOKENS.has(normalizeGoalToken(token)) && tokenMatchesEvidence(token, pageSignal));
 }
 
 function requiresFrameworkSpecificEvidence(tokens: string[]) {
