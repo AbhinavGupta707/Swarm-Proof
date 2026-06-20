@@ -271,6 +271,65 @@ test("external evidence reports and generated tests use target-specific evidence
   assert.doesNotMatch(overview.generatedTest, /project|people|invite|error/i);
 });
 
+test("external report summary prioritizes missed goal evidence over generic auth signals", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://supabase.com/docs",
+    goal: "Find the Next.js quickstart and installation instructions for Supabase.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const step = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "warning",
+    thought: "The persona followed a safe docs path.",
+    result: "Clicked TanStack Start. Goal-evidence signal: partial only; this step did not yet prove the full goal.",
+    url: "https://supabase.com/docs/guides/getting-started/quickstarts/tanstack"
+  });
+
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: false,
+    status: "BLOCKED",
+    summary: "The worker did not reach enough specific evidence for the goal.",
+    issues: [
+      {
+        severity: "MEDIUM",
+        category: "Auth-limited flow",
+        title: "Audit reached an auth or verification wall",
+        description: "The page showed a strong authentication signal.",
+        evidenceStepIds: [step.id],
+        suggestedFix: "Use a public unauthenticated goal."
+      },
+      {
+        severity: "LOW",
+        category: "Goal evidence",
+        title: "Goal evidence was not reached within the safe step budget",
+        description: "The worker explored safe public pages but did not collect enough specific evidence for the requested goal.",
+        evidenceStepIds: [step.id],
+        suggestedFix: "Start from a more specific public URL."
+      }
+    ]
+  });
+
+  const overview = getAuditOverview(created.audit.id);
+  assert.match(overview.report?.summary ?? "", /Goal evidence not reached/);
+  assert.doesNotMatch(overview.report?.summary ?? "", /^Auth-limited stop/);
+});
+
 test("external report synthesis compares persona stories and divergence", () => {
   resetMemoryStoreForTests();
   const created = createAudit({

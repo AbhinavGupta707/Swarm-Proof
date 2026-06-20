@@ -1485,7 +1485,8 @@ function findingClause(stats: EvidenceStats) {
 
 function externalStopReason(audit: AuditRecord) {
   const runHadBlocker = audit.runs.some((run) => run.status !== "SUCCEEDED");
-  const issue = audit.issues.find((candidate) => candidate.category === "Auth-limited flow")
+  const issue = audit.issues.find((candidate) => candidate.category === "Goal evidence")
+    ?? audit.issues.find((candidate) => candidate.category === "Auth-limited flow")
     ?? audit.issues.find((candidate) => candidate.category === "Safety stop")
     ?? audit.issues.find((candidate) => candidate.category === "Execution timeout")
     ?? audit.issues.find((candidate) => candidate.category === "Worker crash")
@@ -1498,6 +1499,10 @@ function externalStopReason(audit: AuditRecord) {
   }
 
   const stats = collectEvidenceStats(audit);
+  if (issue.category === "Goal evidence") {
+    return `Goal evidence not reached: SwarmProof safely explored ${pluralize(stats.stepCount, "evidence step")} but did not collect enough specific evidence for the requested goal before the run ended.`;
+  }
+
   if (issue.category === "Auth-limited flow") {
     return `Auth-limited stop: SwarmProof collected ${pluralize(stats.stepCount, "evidence step")} but found a strong login, password, CAPTCHA, or verification boundary before the goal could continue.`;
   }
