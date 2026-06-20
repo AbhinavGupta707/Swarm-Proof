@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
-import { sanitizeEventProps, type EventName, type SafeEventProps } from "@swarmproof/events";
+import { isAgentEvent, sanitizeEventProps, type EventName, type SafeEventProps, type SwarmProofEventDetail } from "@swarmproof/events";
 
 type SwarmProofEvent = CustomEvent<{ name: EventName; props?: SafeEventProps }>;
 
@@ -35,11 +35,21 @@ export default function PendoInitializer() {
         return;
       }
 
-      window.pendo?.track?.(detail.name, sanitizeEventProps(detail.props));
+      sendToPendo(detail);
     }
 
     window.addEventListener("swarmproof:event", handleSwarmProofEvent);
-    return () => window.removeEventListener("swarmproof:event", handleSwarmProofEvent);
+    window.__swarmproofEventBridgeReady = true;
+    const pending = window.__swarmproofPendingEvents ?? [];
+    window.__swarmproofPendingEvents = [];
+    for (const event of pending) {
+      sendToPendo(event);
+    }
+
+    return () => {
+      window.__swarmproofEventBridgeReady = false;
+      window.removeEventListener("swarmproof:event", handleSwarmProofEvent);
+    };
   }, []);
 
   return null;
@@ -59,11 +69,27 @@ function initializePendo(initialized: { current: boolean }) {
     visitor: {
       id: getAnonymousVisitorId(),
       app: "swarmproof",
-      visitor_type: "anonymous"
+      visitor_type: "anonymous",
+      install_source: "novus_pendo_sdk"
+    },
+    account: {
+      id: "swarmproof-public",
+      app: "swarmproof",
+      hackathon: "mind_the_product_world_product_day_2026"
     }
   });
   initialized.current = true;
   return true;
+}
+
+function sendToPendo(detail: SwarmProofEventDetail) {
+  const safeProps = sanitizeEventProps(detail.props);
+  if (isAgentEvent(detail.name) && typeof window.pendo?.trackAgent === "function") {
+    window.pendo.trackAgent(detail.name, safeProps);
+    return;
+  }
+
+  window.pendo?.track?.(detail.name, safeProps);
 }
 
 function getAnonymousVisitorId() {

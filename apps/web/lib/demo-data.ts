@@ -252,10 +252,17 @@ Actual: The primary action is below the visible panel and the flow stalls.
 Suggested fix: Make the panel scrollable or pin the primary action in a visible footer.`,
   novusEvents: [
     { name: Events.UrlSubmitted, count: 1, safeProps: ["mode", "target_kind", "persona_count"] },
+    { name: Events.AuditCreated, count: 1, safeProps: ["target_kind", "persona_count"] },
+    { name: Events.PreflightStarted, count: 1, safeProps: ["target_kind", "persona_count"] },
+    { name: Events.PreflightCompleted, count: 1, safeProps: ["target_kind", "ok"] },
     { name: Events.AgentRunStarted, count: 3, safeProps: ["audit_id", "persona_mode", "max_steps"] },
     { name: Events.BrowserStepCompleted, count: 18, safeProps: ["audit_id", "persona_mode", "step_index", "status"] },
     { name: Events.IssueDetected, count: 4, safeProps: ["audit_id", "severity", "category"] },
+    { name: Events.RunCompleted, count: 3, safeProps: ["audit_id", "persona_mode", "status"] },
     { name: Events.ReportGenerated, count: 1, safeProps: ["audit_id", "score", "issue_count"] },
+    { name: Events.ReplayOpened, count: 1, safeProps: ["target_kind", "persona", "step_count"] },
+    { name: Events.TestExported, count: 1, safeProps: ["target_kind", "issue_count", "has_generated_test"] },
+    { name: Events.BugReportDownloaded, count: 1, safeProps: ["target_kind", "issue_count", "score", "outcome"] },
     { name: Events.ShareCreated, count: 1, safeProps: ["audit_id", "public_report"] }
   ]
 };
