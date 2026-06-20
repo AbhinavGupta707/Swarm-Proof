@@ -255,7 +255,7 @@ function reportHeadline(audit: Awaited<ReturnType<typeof getAuditForPage>>) {
   if (audit.status === "RUNNING") return "Evidence is still coming in.";
   if (audit.runs.some((run) => run.status === "TIMED_OUT")) return "Partial report ready after timeout.";
   if (audit.issues.some((issue) => issue.category === "Worker crash")) return "Partial report ready after worker crash.";
-  if (audit.runs.some((run) => run.status === "BLOCKED")) return "Safety-limited partial report ready.";
+  if (audit.runs.some((run) => run.status === "BLOCKED")) return "Partial report ready with verifier blocker.";
   if (audit.report?.outcome === "fail") return "Needs fixes before real traffic.";
   if (audit.report?.outcome === "pass" && technicalArtifactsForAudit(audit).length > 0) return "Goal verified with technical artifacts.";
   if (audit.report?.outcome === "pass") return "Clean pass for this audit path.";

@@ -85,8 +85,11 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
 
   const hasActiveRun = audit.status === "RUNNING" || audit.runs.some((run) => run.status === "RUNNING" || run.status === "PENDING");
   const timedOutRuns = audit.runs.filter((run) => run.status === "TIMED_OUT").length;
+  const blockedRuns = audit.runs.filter((run) => run.status === "BLOCKED").length;
+  const failedRuns = audit.runs.filter((run) => run.status === "FAILED").length;
   const crashedRuns = audit.issues.filter((issue) => issue.category === "Worker crash").length;
   const partialReady = !hasActiveRun && audit.runs.some((run) => ["FAILED", "BLOCKED", "TIMED_OUT"].includes(run.status));
+  const partialOutcome = { blockedRuns, crashedRuns, failedRuns, timedOutRuns };
   const userIssues = useMemo(() => userFacingIssuesForAudit(audit), [audit]);
   const technicalArtifacts = useMemo(() => technicalArtifactsForAudit(audit), [audit]);
   const timeline = useMemo(() => auditTimeline(audit), [audit]);
@@ -162,7 +165,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="font-mono text-sm font-semibold text-indigo">Audit {audit.id}</p>
-            <h1 className="mt-2 text-4xl font-semibold tracking-normal">{headingForAudit(hasActiveRun, partialReady, timedOutRuns, crashedRuns)}</h1>
+            <h1 className="mt-2 text-4xl font-semibold tracking-normal">{headingForAudit(hasActiveRun, partialReady, partialOutcome)}</h1>
             <p className="mt-3 max-w-3xl leading-7 text-slate-700">{audit.goal}</p>
             <div className="mt-4 flex flex-wrap gap-2">
               <span className={`rounded-ui px-2 py-1 font-mono text-xs font-semibold ${auditStatusStyles[audit.status]}`}>{audit.status}</span>
@@ -254,7 +257,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
             </div>
             {partialReady ? (
               <p className="mt-4 rounded-ui border border-amber/30 bg-amber/10 p-3 text-sm font-semibold text-amber">
-                Partial report ready. Timed out, blocked, or crashed personas are settled and can be retried after checking worker health.
+                {partialReadyMessage(partialOutcome)}
               </p>
             ) : null}
             {pollError ? <p className="mt-4 rounded-ui border border-amber/30 bg-amber/10 p-3 text-sm font-semibold text-amber">{pollError}</p> : null}
@@ -290,7 +293,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
             </p>
             <h2 className="mt-3 text-2xl font-semibold">{liveSummaryTitle({ hasActiveRun, partialReady, userIssueCount: userIssues.length, technicalArtifactCount: technicalArtifacts.length })}</h2>
             <p className="mt-3 text-sm leading-6 text-slate-300">
-              {liveSummaryBody({ hasActiveRun, partialReady, userIssueCount: userIssues.length, technicalArtifactCount: technicalArtifacts.length })}
+              {liveSummaryBody({ hasActiveRun, partialReady, userIssueCount: userIssues.length, technicalArtifactCount: technicalArtifacts.length, partialOutcome })}
             </p>
             <div className="mt-5 grid gap-3 text-sm">
               <p className="flex items-center gap-2"><Clock3 className="h-4 w-4 text-emerald" aria-hidden="true" /> {auditTimeToValue(audit)}</p>
@@ -346,12 +349,41 @@ function summaryForRun(status: RunStatus) {
   return "Persona was blocked.";
 }
 
-function headingForAudit(hasActiveRun: boolean, partialReady: boolean, timedOutRuns: number, crashedRuns: number) {
+type PartialOutcome = {
+  blockedRuns: number;
+  crashedRuns: number;
+  failedRuns: number;
+  timedOutRuns: number;
+};
+
+function headingForAudit(hasActiveRun: boolean, partialReady: boolean, outcome: PartialOutcome) {
   if (hasActiveRun) return "Personas are testing the goal.";
-  if (timedOutRuns > 0) return "Partial report ready after timeout.";
-  if (crashedRuns > 0) return "Partial report ready after worker crash.";
+  if (outcome.timedOutRuns > 0) return "Partial report ready after timeout.";
+  if (outcome.crashedRuns > 0) return "Partial report ready after worker crash.";
+  if (outcome.failedRuns > 0) return "Partial report ready after failed run.";
+  if (outcome.blockedRuns > 0) return "Partial report ready with verifier blocker.";
   if (partialReady) return "Partial report ready.";
   return "Audit run settled cleanly.";
+}
+
+function partialReadyMessage(outcome: PartialOutcome) {
+  if (outcome.timedOutRuns > 0) {
+    return `${pluralize(outcome.timedOutRuns, "persona")} timed out. SwarmProof settled the run and preserved the evidence that arrived before the timeout.`;
+  }
+
+  if (outcome.crashedRuns > 0) {
+    return "The browser worker crashed or disconnected during one persona. SwarmProof preserved the available evidence and finalized a partial report.";
+  }
+
+  if (outcome.failedRuns > 0) {
+    return `${pluralize(outcome.failedRuns, "persona")} failed during execution. The available evidence is preserved in the report for review.`;
+  }
+
+  if (outcome.blockedRuns > 0) {
+    return `${pluralize(outcome.blockedRuns, "persona")} stopped because the verifier found missing or off-goal evidence. This is a product finding, not a worker crash.`;
+  }
+
+  return "Partial report ready. The available evidence has been preserved for review.";
 }
 
 function liveSummaryTitle({
@@ -380,16 +412,18 @@ function liveSummaryTitle({
 function liveSummaryBody({
   hasActiveRun,
   partialReady,
+  partialOutcome,
   userIssueCount,
   technicalArtifactCount
 }: {
   hasActiveRun: boolean;
   partialReady: boolean;
+  partialOutcome: PartialOutcome;
   userIssueCount: number;
   technicalArtifactCount: number;
 }) {
   if (hasActiveRun) return "This panel updates as each persona sends safe, sanitized callbacks.";
-  if (partialReady) return "Some personas stopped early, timed out, or were blocked; the available evidence has been preserved.";
+  if (partialReady) return partialReadyMessage(partialOutcome);
   if (userIssueCount > 0) return "Open the report to see which persona hit each blocker and what evidence supports it.";
   if (technicalArtifactCount > 0) return "The personas reached the goal; console or network artifacts are retained separately for engineering follow-up.";
   return "The report, generated test, and share link are ready to inspect for this run.";
@@ -399,4 +433,8 @@ function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function pluralize(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
