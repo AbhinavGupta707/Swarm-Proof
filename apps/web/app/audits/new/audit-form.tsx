@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
-import { Events, trackEvent } from "@swarmproof/events";
+import { Events } from "@swarmproof/events";
 
 type CreateAuditResponse = {
   ok: boolean;
@@ -31,7 +31,7 @@ export function AuditForm() {
     const demoTarget = forceDemo || targetUrl.trim().startsWith("/demo-target");
 
     try {
-      trackEvent(Events.UrlSubmitted, {
+      window.pendo?.track?.(Events.UrlSubmitted, {
         target_kind: demoTarget ? "demo" : "public",
         persona_count: modes.length,
         max_steps: 15
@@ -47,18 +47,18 @@ export function AuditForm() {
         throw new Error(createJson.error?.message ?? "Could not create audit.");
       }
 
-      trackEvent(Events.AuditCreated, {
+      window.pendo?.track?.(Events.AuditCreated, {
         target_kind: demoTarget ? "demo" : "public",
         persona_count: modes.length
       });
 
-      trackEvent(Events.PreflightStarted, {
+      window.pendo?.track?.(Events.PreflightStarted, {
         target_kind: demoTarget ? "demo" : "public",
         persona_count: modes.length
       });
 
       const preflightResponse = await fetch(`/api/audits/${createJson.data.auditId}/preflight`, { method: "POST" });
-      trackEvent(Events.PreflightCompleted, {
+      window.pendo?.track?.(Events.PreflightCompleted, {
         target_kind: demoTarget ? "demo" : "public",
         ok: preflightResponse.ok
       });
@@ -71,7 +71,7 @@ export function AuditForm() {
       } catch {
         workerDispatched = false;
       }
-      trackEvent(Events.AgentRunStarted, {
+      window.pendo?.track?.(Events.AgentRunStarted, {
         target_kind: demoTarget ? "demo" : "public",
         persona_count: modes.length,
         worker_dispatched: workerDispatched

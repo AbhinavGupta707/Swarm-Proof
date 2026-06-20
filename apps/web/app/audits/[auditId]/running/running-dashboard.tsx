@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, CircleStop, Clock3, Eye, Loader2, Monitor, RefreshCw, Smartphone, Zap } from "lucide-react";
-import { Events, trackEvent, type EventName } from "@swarmproof/events";
+import { Events, type EventName } from "@swarmproof/events";
 import type {
   ArtifactSummary,
   AuditEventSummary,
@@ -112,7 +112,7 @@ export function RunningDashboard({ initialAudit, initialEventCount = 0 }: { init
           }
 
           mirroredEventIds.add(event.id);
-          trackEvent(event.name, {
+          window.pendo?.track?.(event.name, {
             ...event.props,
             target_kind: data.preflight?.isDemoTarget ? "demo" : "public"
           });
