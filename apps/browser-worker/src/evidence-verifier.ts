@@ -25,28 +25,14 @@ type AiVerifierDecision = {
 
 export function verifyEvidence(input: VerifyEvidenceInput): EvidenceVerifierResult {
   const observations = input.observations.slice(-8);
-  const safetyFailures = deterministicSafetyFailures(observations);
-  const metRequirements: EvidenceRequirementResult[] = [];
-  const missingRequirements: EvidenceRequirementResult[] = [];
-
-  for (const requirement of input.goalSpec.mustFind) {
-    const evidence = evidenceForRequirement(requirement, observations);
-    if (evidence.length > 0) {
-      metRequirements.push({
-        id: requirement.id,
-        label: requirement.label,
-        evidence: evidence.slice(0, 4)
-      });
-    } else {
-      missingRequirements.push({
-        id: requirement.id,
-        label: requirement.label,
-        evidence: []
-      });
-    }
-  }
-
-  const supportingStepIds = supportingStepIdsFor(input.goalSpec.mustFind, observations);
+  const safetyFailures = deterministicSafetyFailures(input.goalSpec, observations);
+  const runEvidence = evidenceCoverageFor(input.goalSpec.mustFind, observations);
+  const bestCluster = bestCoherentCluster(input.goalSpec, observations);
+  const metRequirements = bestCluster.complete ? bestCluster.metRequirements : runEvidence.metRequirements;
+  const missingRequirements = missingRequirementsFor(input.goalSpec.mustFind, runEvidence, bestCluster);
+  const supportingStepIds = bestCluster.complete
+    ? bestCluster.supportingStepIds
+    : supportingStepIdsFor(input.goalSpec.mustFind, observations);
   const missingLabels = missingRequirements.map((item) => item.label);
   const metLabels = metRequirements.map((item) => item.label);
   const hasNoActionRisk = observations.at(-1)?.riskSignals.some((signal) => signal.type === "no_action") ?? false;
@@ -126,6 +112,97 @@ function mergeAiDecision(deterministic: EvidenceVerifierResult, decision: AiVeri
   };
 }
 
+function evidenceCoverageFor(requirements: EvidenceRequirement[], observations: PageObservation[]) {
+  const metRequirements: EvidenceRequirementResult[] = [];
+  const missingRequirements: EvidenceRequirementResult[] = [];
+  for (const requirement of requirements) {
+    const evidence = evidenceForRequirement(requirement, observations);
+    if (evidence.length > 0) {
+      metRequirements.push({
+        id: requirement.id,
+        label: requirement.label,
+        evidence: evidence.slice(0, 4)
+      });
+    } else {
+      missingRequirements.push({
+        id: requirement.id,
+        label: requirement.label,
+        evidence: []
+      });
+    }
+  }
+  return { metRequirements, missingRequirements };
+}
+
+function bestCoherentCluster(goalSpec: GoalSpec, observations: PageObservation[]) {
+  let best: {
+    observation?: PageObservation;
+    metRequirements: EvidenceRequirementResult[];
+    supportingStepIds: string[];
+    complete: boolean;
+  } = {
+    metRequirements: [],
+    supportingStepIds: [],
+    complete: goalSpec.mustFind.length === 0
+  };
+
+  for (const observation of observations) {
+    if (isTopicDrift(goalSpec, observation)) {
+      continue;
+    }
+    const coverage = evidenceCoverageFor(goalSpec.mustFind, [observation]);
+    if (coverage.metRequirements.length > best.metRequirements.length) {
+      best = {
+        observation,
+        metRequirements: coverage.metRequirements,
+        supportingStepIds: observation.stepId ? [observation.stepId] : [],
+        complete: coverage.missingRequirements.length === 0
+      };
+    }
+    if (coverage.missingRequirements.length === 0) {
+      return {
+        observation,
+        metRequirements: coverage.metRequirements,
+        supportingStepIds: observation.stepId ? [observation.stepId] : [],
+        complete: true
+      };
+    }
+  }
+
+  return best;
+}
+
+function missingRequirementsFor(
+  requirements: EvidenceRequirement[],
+  runEvidence: { metRequirements: EvidenceRequirementResult[]; missingRequirements: EvidenceRequirementResult[] },
+  bestCluster: { complete: boolean; metRequirements: EvidenceRequirementResult[] }
+) {
+  if (runEvidence.missingRequirements.length > 0) {
+    return runEvidence.missingRequirements;
+  }
+  if (bestCluster.complete) {
+    return [];
+  }
+
+  const clusterMet = new Set(bestCluster.metRequirements.map((item) => item.id));
+  const clusterMissing = requirements
+    .filter((requirement) => !clusterMet.has(requirement.id))
+    .map((requirement) => ({
+      id: requirement.id,
+      label: requirement.label,
+      evidence: []
+    }));
+
+  return [
+    ...clusterMissing,
+    {
+      id: "coherent_goal_evidence",
+      label: "Coherent same-page goal evidence",
+      evidence: []
+    }
+  ];
+}
+
 function evidenceForRequirement(requirement: EvidenceRequirement, observations: PageObservation[]) {
   const evidence: string[] = [];
   for (const observation of observations) {
@@ -194,7 +271,7 @@ function textEvidenceForObservation(observation: PageObservation) {
   ];
 }
 
-function deterministicSafetyFailures(observations: PageObservation[]) {
+function deterministicSafetyFailures(goalSpec: GoalSpec, observations: PageObservation[]) {
   const failures: string[] = [];
   for (const observation of observations) {
     for (const signal of observation.riskSignals) {
@@ -206,7 +283,33 @@ function deterministicSafetyFailures(observations: PageObservation[]) {
       failures.push(`Navigation reached a forbidden or credential/payment URL path: ${observation.url}`);
     }
   }
+  const latestObservation = observations.at(-1);
+  if (latestObservation && isTopicDrift(goalSpec, latestObservation)) {
+    failures.push(`Topic drift: latest evidence is about ${topicDriftLabel(goalSpec, latestObservation)} instead of ${goalSpec.topicFocus?.label ?? "the requested goal"}.`);
+  }
   return [...new Set(failures)].slice(0, 5);
+}
+
+function isTopicDrift(goalSpec: GoalSpec, observation: PageObservation) {
+  const focus = goalSpec.topicFocus;
+  if (!focus) return false;
+  const text = normalizeEvidence([
+    observation.url,
+    observation.title,
+    ...observation.headings,
+    ...observation.visibleSnippets.slice(0, 3)
+  ].join(" "));
+  const hasRequired = focus.requiredTerms.some((term) => evidenceTermMatches(text, term))
+    || focus.relatedTerms.some((term) => evidenceTermMatches(text, term));
+  const hasExcluded = focus.excludedTerms.some((term) => evidenceTermMatches(text, term));
+  return hasExcluded && !hasRequired;
+}
+
+function topicDriftLabel(goalSpec: GoalSpec, observation: PageObservation) {
+  const focus = goalSpec.topicFocus;
+  if (!focus) return "another topic";
+  const text = normalizeEvidence(`${observation.url} ${observation.title} ${observation.headings.join(" ")}`);
+  return focus.excludedTerms.find((term) => evidenceTermMatches(text, term)) ?? "another topic";
 }
 
 function niceToFindCount(goalSpec: GoalSpec, observations: PageObservation[]) {

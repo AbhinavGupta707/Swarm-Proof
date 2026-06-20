@@ -1,10 +1,10 @@
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, FileCode2, Share2, Sparkles } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileCode2, GitPullRequest, Share2, Sparkles } from "lucide-react";
 import { createShareAsync } from "@swarmproof/db";
 import { Events } from "@swarmproof/events";
 import { TrackPageEvent } from "@/app/track-page-event";
 import { BugReportDownloadLink } from "./bug-report-download";
-import { auditPreflightLabel, auditSuccessRate, auditTimeToValue, bugReportForAudit, suggestedFixesForAudit } from "@/lib/audit-presenters";
+import { actionPlanMarkdownForAudit, auditPreflightLabel, auditSuccessRate, auditTimeToValue, bugReportForAudit, suggestedFixesForAudit } from "@/lib/audit-presenters";
 import { getAuditForPage } from "@/lib/audit-data";
 
 export const dynamic = "force-dynamic";
@@ -28,6 +28,8 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
   const report = audit.report;
   const fixes = suggestedFixesForAudit(audit);
   const bugReport = bugReportForAudit(audit);
+  const actionPlan = report?.reportJson.actionPlan;
+  const actionPlanMarkdown = actionPlanMarkdownForAudit(audit);
   const headline = reportHeadline(audit);
 
   return (
@@ -144,6 +146,39 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
             </ol>
           </div>
           <div className="rounded-ui border border-line bg-panel p-5">
+            <h2 className="flex items-center gap-2 text-lg font-semibold">
+              <GitPullRequest className="h-5 w-5 text-indigo" aria-hidden="true" />
+              PR-ready suggestion
+            </h2>
+            {actionPlan ? (
+              <div className="mt-4 grid gap-4">
+                <div className="rounded-ui bg-mist p-3 text-sm leading-6">
+                  <p className="font-semibold">{actionPlan.pullRequestDraft.title}</p>
+                  <p className="mt-1 font-mono text-xs text-slate-600">{actionPlan.pullRequestDraft.branchName}</p>
+                </div>
+                <div className="grid gap-3">
+                  {actionPlan.items.slice(0, 3).map((item) => (
+                    <article key={item.title} className="border-b border-line pb-3 last:border-b-0 last:pb-0">
+                      <p className="font-mono text-xs font-semibold text-indigo">{item.priority} · {item.owner}</p>
+                      <h3 className="mt-1 font-semibold">{item.title}</h3>
+                      <p className="mt-1 text-sm leading-6 text-slate-700">{item.suggestedChange}</p>
+                    </article>
+                  ))}
+                </div>
+                <p className="text-sm leading-6 text-slate-600">
+                  Likely files: {actionPlan.pullRequestDraft.filesChanged.slice(0, 3).join(", ")}
+                </p>
+              </div>
+            ) : (
+              <p className="mt-4 rounded-ui border border-dashed border-line bg-mist p-4 text-sm font-semibold text-slate-600">
+                Waiting for report synthesis to produce a PR suggestion.
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className="mt-6">
+          <div className="rounded-ui border border-line bg-panel p-5">
             <h2 className="text-lg font-semibold">Generated exports</h2>
             <div className="mt-4 grid gap-3">
               <Link className="inline-flex min-h-11 items-center justify-between gap-3 rounded-ui border border-line px-4 py-3 font-semibold hover:bg-mist" href={`/audits/${audit.id}/tests`}>
@@ -157,6 +192,14 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                 score={audit.score}
                 outcome={report?.outcome ?? audit.status}
               />
+              <a
+                className="inline-flex min-h-11 items-center justify-between gap-3 rounded-ui border border-line px-4 py-3 font-semibold hover:bg-mist"
+                href={`data:text/markdown;charset=utf-8,${encodeURIComponent(actionPlanMarkdown)}`}
+                download="swarmproof-pr-suggestion.md"
+              >
+                PR suggestion brief
+                <Download className="h-4 w-4 text-indigo" aria-hidden="true" />
+              </a>
               <p className="rounded-ui bg-mist p-3 text-sm leading-6 text-slate-600">
                 <AlertTriangle className="mr-1 inline h-4 w-4 text-indigo" aria-hidden="true" />
                 Event telemetry is privacy-safe: no private URLs, credentials, screenshots, or raw target-page text are sent to analytics.

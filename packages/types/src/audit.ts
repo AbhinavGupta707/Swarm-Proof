@@ -112,8 +112,33 @@ export type AuditReportSummary = {
     issues: AuditIssueSummary[];
     verifierResults?: EvidenceVerifierResult[];
     playwrightTests: Array<{ name: string; code: string }>;
+    actionPlan?: AuditActionPlanSummary;
   };
   createdAt: string;
+};
+
+export type AuditActionPlanSummary = {
+  title: string;
+  summary: string;
+  confidence: number;
+  items: AuditActionPlanItem[];
+  pullRequestDraft: {
+    title: string;
+    body: string;
+    branchName: string;
+    filesChanged: string[];
+    limitations: string[];
+  };
+};
+
+export type AuditActionPlanItem = {
+  title: string;
+  priority: "P0" | "P1" | "P2";
+  owner: "Product" | "Design" | "Frontend" | "Full-stack" | "QA";
+  rationale: string;
+  suggestedChange: string;
+  evidenceStepIds: string[];
+  acceptanceCriteria: string[];
 };
 
 export type AuditSummary = {

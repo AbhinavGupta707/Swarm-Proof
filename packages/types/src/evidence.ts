@@ -12,6 +12,7 @@ export type GoalSpec = {
   goal: string;
   personaMode: PersonaMode;
   personaInterpretation: string;
+  topicFocus?: GoalTopicFocus;
   mustFind: EvidenceRequirement[];
   niceToFind: EvidenceRequirement[];
   forbiddenActions: string[];
@@ -24,6 +25,13 @@ export type GoalSpec = {
     notes: string[];
   };
   compiledBy: "deterministic" | "llm";
+};
+
+export type GoalTopicFocus = {
+  label: string;
+  requiredTerms: string[];
+  relatedTerms: string[];
+  excludedTerms: string[];
 };
 
 export type ObservedActionKind = "link" | "button" | "input";

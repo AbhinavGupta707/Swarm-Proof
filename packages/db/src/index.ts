@@ -4,6 +4,8 @@ import { buildEvidencePlaywrightTest } from "@swarmproof/testgen";
 import { Pool, type PoolClient } from "pg";
 import type {
   ArtifactKind,
+  AuditActionPlanItem,
+  AuditActionPlanSummary,
   ArtifactSummary,
   AuditJobSummary,
   AuditProvider,
@@ -947,6 +949,7 @@ export function generateAuditReport(auditId: string) {
       ? "partial"
       : "pass";
   const score = calculateScore(audit);
+  const actionPlan = buildActionPlan(audit, outcome);
   const now = new Date().toISOString();
   const report: AuditReportSummary = {
     id: audit.report?.id ?? createId("report"),
@@ -954,12 +957,13 @@ export function generateAuditReport(auditId: string) {
     summary: buildReportSummary(audit),
     score,
     outcome,
-    markdown: buildMarkdownReport(audit, score, outcome, generatedTest),
+    markdown: buildMarkdownReport(audit, score, outcome, generatedTest, actionPlan),
     reportJson: {
       outcome,
       issues: audit.issues,
       verifierResults: audit.runs.flatMap((run) => run.verifierResult ? [run.verifierResult] : []),
-      playwrightTests: [{ name: "swarmproof generated smoke test", code: generatedTest }]
+      playwrightTests: [{ name: "swarmproof generated smoke test", code: generatedTest }],
+      actionPlan
     },
     createdAt: audit.report?.createdAt ?? now
   };
@@ -1396,7 +1400,7 @@ function buildReportSummary(audit: AuditRecord) {
   return `SwarmProof collected an evidence-backed trace with ${pluralize(stats.stepCount, "step")} across ${pluralize(stats.runCount, "persona")} and ${findingClause(stats)}.`;
 }
 
-function buildMarkdownReport(audit: AuditRecord, score: number, outcome: AuditOutcomeValue, generatedTest: string) {
+function buildMarkdownReport(audit: AuditRecord, score: number, outcome: AuditOutcomeValue, generatedTest: string, actionPlan: AuditActionPlanSummary) {
   const stats = collectEvidenceStats(audit);
   const personaSections = audit.runs.map((run) => formatRunEvidence(audit, run)).join("\n\n");
   const issueSections = audit.issues.map((issue, index) => formatIssueEvidence(audit, issue, index + 1)).join("\n\n");
@@ -1433,6 +1437,9 @@ ${limitations}
 ## Product recommendations
 ${recommendations}
 
+## PR-ready suggestion brief
+${formatActionPlanMarkdown(actionPlan)}
+
 ## Reproduction evidence
 ${issueSections || "- No issues detected in this run."}
 
@@ -1461,7 +1468,7 @@ function buildGeneratedTest(audit: AuditRecord) {
     name: "swarmproof generated smoke test",
     targetUrl: target,
     goal: audit.goal,
-    steps: collectStepEvidence(audit).map(({ step }) => ({
+    steps: collectRegressionStepEvidence(audit).map(({ step }) => ({
       stepIndex: step.stepIndex,
       action: step.action,
       result: step.result,
@@ -1479,6 +1486,32 @@ function buildGeneratedTest(audit: AuditRecord) {
 
 function collectStepEvidence(audit: AuditRecord): StepEvidence[] {
   return audit.runs.flatMap((run) => (run.steps ?? []).map((step) => ({ run, step })));
+}
+
+function collectRegressionStepEvidence(audit: AuditRecord): StepEvidence[] {
+  return collectStepEvidence(audit).filter(({ run, step }) => !isOffTopicStep(run.goalSpec, step));
+}
+
+function isOffTopicStep(goalSpec: AuditRunSummary["goalSpec"], step: BrowserStepSummary) {
+  const focus = goalSpec?.topicFocus;
+  if (!focus) return false;
+  const urlText = `${step.url ?? ""}`.toLowerCase();
+  const stepText = `${step.result} ${step.thought ?? ""}`.toLowerCase();
+  const text = `${urlText} ${stepText}`;
+  const urlHasExcluded = focus.excludedTerms.some((term) => urlText.includes(term));
+  const urlHasRequired = focus.requiredTerms.some((term) => urlText.includes(term))
+    || focus.relatedTerms.some((term) => urlText.includes(term));
+  if (urlHasExcluded && !urlHasRequired) {
+    return true;
+  }
+
+  const hasExcluded = focus.excludedTerms.some((term) => text.includes(term));
+  const hasRequired = focus.requiredTerms.some((term) => text.includes(term))
+    || focus.relatedTerms.some((term) => text.includes(term));
+  if (hasExcluded && /\b(instead of|off-topic|off topic|drifted|drift|away from)\b/i.test(stepText)) {
+    return true;
+  }
+  return hasExcluded && !hasRequired;
 }
 
 function collectVerifiedEvidence(audit: AuditRecord) {
@@ -1664,6 +1697,170 @@ function formatProductRecommendations(audit: AuditRecord) {
   }).join("\n");
 }
 
+function buildActionPlan(audit: AuditRecord, outcome: AuditOutcomeValue): AuditActionPlanSummary {
+  const issueItems = audit.issues.slice(0, 4).map((issue): AuditActionPlanItem => ({
+    title: issue.category === "Goal drift" ? "Keep the agent path anchored to the requested product" : issue.title,
+    priority: priorityForIssue(issue),
+    owner: ownerForIssue(issue),
+    rationale: safeLine(issue.description, 260),
+    suggestedChange: safeLine(issue.suggestedFix ?? implementationHintForIssue(issue), 260),
+    evidenceStepIds: issue.evidenceStepIds?.slice(0, 6) ?? [],
+    acceptanceCriteria: acceptanceCriteriaForIssue(audit, issue)
+  }));
+  const verifierItems = audit.runs
+    .filter((run) => run.verifierResult && run.verifierResult.verdict !== "SUCCEEDED")
+    .slice(0, 3)
+    .map((run): AuditActionPlanItem => ({
+      title: `Clarify ${run.mode} path to required goal evidence`,
+      priority: "P1",
+      owner: "Product",
+      rationale: safeLine(run.verifierResult?.explanation ?? "The verifier did not confirm all required evidence.", 260),
+      suggestedChange: "Add clearer public labels, page structure, or read-only content that exposes the missing goal evidence before commitment boundaries.",
+      evidenceStepIds: (run.steps ?? []).map((step) => step.id).slice(0, 6),
+      acceptanceCriteria: [
+        "A first-time user can identify the requested goal evidence without signing in or checking out.",
+        "The corrected flow keeps users on the requested product or topic.",
+        "The generated Playwright starter can assert the corrected public state."
+      ]
+    }));
+  const fallbackItem: AuditActionPlanItem = {
+    title: outcome === "pass" ? "Lock in the verified public path" : "Review partial audit evidence",
+    priority: outcome === "pass" ? "P2" : "P1",
+    owner: "QA",
+    rationale: outcome === "pass"
+      ? "All completed personas reached verifier-confirmed evidence, so the main action is regression coverage."
+      : "SwarmProof produced partial evidence but did not identify a single blocking product fix.",
+    suggestedChange: outcome === "pass"
+      ? "Add the generated Playwright starter as a smoke regression and keep the public content observable before account creation."
+      : "Review the linked persona evidence and turn the most visible public friction into clearer labels or routing.",
+    evidenceStepIds: audit.runs.flatMap((run) => (run.steps ?? []).map((step) => step.id)).slice(0, 6),
+    acceptanceCriteria: [
+      "A safe public audit can be repeated without private data.",
+      "The report outcome and generated test reference the same observed path."
+    ]
+  };
+  const items = [...issueItems, ...verifierItems].length > 0 ? [...issueItems, ...verifierItems].slice(0, 5) : [fallbackItem];
+  const title = outcome === "pass"
+    ? "Regression PR suggestion"
+    : audit.issues.some((issue) => issue.category === "Goal drift")
+      ? "Goal-drift fix PR suggestion"
+      : "Product-friction PR suggestion";
+  const branchName = `swarmproof/${slugify(audit.goal).slice(0, 42) || audit.id}`;
+  const filesChanged = suggestedFilesForActionPlan(items);
+
+  return {
+    title,
+    summary: safeLine(`${items.length} suggested change${items.length === 1 ? "" : "s"} generated from ${pluralize(collectEvidenceStats(audit).stepCount, "evidence step")} across ${pluralize(audit.runs.length, "persona")}.`, 240),
+    confidence: outcome === "pass" ? 0.72 : Math.min(0.9, 0.62 + Math.min(items.length, 3) * 0.08),
+    items,
+    pullRequestDraft: {
+      title: `${title}: ${safeLine(audit.goal, 90)}`,
+      body: formatPullRequestBody(audit, items),
+      branchName,
+      filesChanged,
+      limitations: [
+        "This is a suggested implementation brief, not an automatic code patch against the target repository.",
+        "A developer should map the suggested files to the real target app before merging.",
+        "SwarmProof only used public, sanitized evidence from this audit."
+      ]
+    }
+  };
+}
+
+function formatActionPlanMarkdown(actionPlan: AuditActionPlanSummary) {
+  const items = actionPlan.items.map((item, index) => `### ${index + 1}. ${item.title}
+- Priority: ${item.priority}
+- Owner: ${item.owner}
+- Rationale: ${item.rationale}
+- Suggested change: ${item.suggestedChange}
+- Evidence steps: ${item.evidenceStepIds.join(", ") || "none linked"}
+- Acceptance criteria:
+${item.acceptanceCriteria.map((criterion) => `  - ${criterion}`).join("\n")}`).join("\n\n");
+
+  return `- Title: ${actionPlan.pullRequestDraft.title}
+- Suggested branch: ${actionPlan.pullRequestDraft.branchName}
+- Likely files: ${actionPlan.pullRequestDraft.filesChanged.join(", ") || "target app files to be mapped by the owner"}
+- Confidence: ${Math.round(actionPlan.confidence * 100)}%
+
+${items}
+
+#### Draft PR body
+${actionPlan.pullRequestDraft.body}`;
+}
+
+function formatPullRequestBody(audit: AuditRecord, items: AuditActionPlanItem[]) {
+  return `## Summary
+- Address SwarmProof findings for: ${safeLine(audit.goal, 160)}
+- Target audited: ${displayTarget(audit)}
+- Convert observed persona evidence into small public-flow improvements.
+
+## Suggested changes
+${items.map((item) => `- [ ] ${item.title}: ${item.suggestedChange}`).join("\n")}
+
+## Acceptance criteria
+${[...new Set(items.flatMap((item) => item.acceptanceCriteria))].slice(0, 8).map((criterion) => `- [ ] ${criterion}`).join("\n")}
+
+## Evidence
+${items.map((item) => `- ${item.title}: ${item.evidenceStepIds.join(", ") || "report-level evidence"}`).join("\n")}`;
+}
+
+function priorityForIssue(issue: AuditIssueSummary): AuditActionPlanItem["priority"] {
+  if (issue.severity === "CRITICAL" || issue.severity === "HIGH") return "P0";
+  if (issue.severity === "MEDIUM" || issue.category === "Goal drift" || issue.category === "Goal evidence") return "P1";
+  return "P2";
+}
+
+function ownerForIssue(issue: AuditIssueSummary): AuditActionPlanItem["owner"] {
+  if (issue.category === "Goal drift" || issue.category === "Goal evidence") return "Product";
+  if (issue.category.includes("Mobile") || /layout|viewport|cta|button|label/i.test(issue.title)) return "Frontend";
+  if (issue.category === "Network" || issue.category === "Console") return "Full-stack";
+  if (issue.category === "Accessibility") return "Design";
+  return "Product";
+}
+
+function acceptanceCriteriaForIssue(audit: AuditRecord, issue: AuditIssueSummary) {
+  if (issue.category === "Goal drift") {
+    return [
+      "A persona pursuing the goal stays on pages related to the requested product or topic.",
+      "Off-topic catalog or documentation pages produce a partial report instead of a clean pass.",
+      "Generated tests do not replay off-topic navigation."
+    ];
+  }
+
+  return [
+    `A user can pursue "${safeLine(audit.goal, 120)}" without hitting this issue.`,
+    "The corrected state is visible before signup, login, checkout, payment, or private-data entry.",
+    "A Playwright regression can assert the corrected public state."
+  ];
+}
+
+function suggestedFilesForActionPlan(items: AuditActionPlanItem[]) {
+  const files = new Set<string>();
+  for (const item of items) {
+    if (item.owner === "Frontend" || /label|cta|layout|button|navigation/i.test(`${item.title} ${item.suggestedChange}`)) {
+      files.add("app/components/navigation-or-flow.tsx");
+      files.add("app/styles/responsive-flow.css");
+    } else if (item.owner === "Full-stack") {
+      files.add("app/api/public-flow/route.ts");
+      files.add("lib/observability.ts");
+    } else if (item.owner === "QA") {
+      files.add("tests/swarmproof-public-flow.spec.ts");
+    } else {
+      files.add("app/(public)/goal-flow/page.tsx");
+      files.add("content/public-flow-copy.md");
+    }
+  }
+  files.add("tests/swarmproof-public-flow.spec.ts");
+  return [...files].slice(0, 5);
+}
+
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 function formatIssueEvidence(audit: AuditRecord, issue: AuditIssueSummary, index: number) {
   const evidence = evidenceForIssue(audit, issue);
   return `### ${index}. ${issue.title}
@@ -1823,7 +2020,7 @@ function buildAiReportPrompt(audit: AuditRecord) {
       meta: artifact.meta
     }))
   };
-  return `Write JSON with optional keys summary, markdown, and generatedTest. Do not invent evidence or include raw screenshots.\n${JSON.stringify(digest, null, 2)}`;
+  return `Write JSON with optional keys summary, markdown, and generatedTest. Include PR-ready recommendations in markdown when useful. Do not invent evidence or include raw screenshots.\n${JSON.stringify(digest, null, 2)}`;
 }
 
 function sanitizeAiReportDraft(draft: AiReportDraft): AiReportDraft {
@@ -2109,7 +2306,9 @@ function buildPublicGeneratedTest(summary: AuditSummary) {
     name: "swarmproof generated smoke test",
     targetUrl: target,
     goal: summary.goal,
-    steps: summary.runs.flatMap((run) => (run.steps ?? []).map((step) => ({
+    steps: summary.runs.flatMap((run) => (run.steps ?? [])
+      .filter((step) => !isOffTopicStep(run.goalSpec, step))
+      .map((step) => ({
       stepIndex: step.stepIndex,
       action: step.action,
       result: step.result,

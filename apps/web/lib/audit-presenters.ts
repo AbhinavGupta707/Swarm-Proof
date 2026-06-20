@@ -82,6 +82,15 @@ export function suggestedFixesForAudit(audit: AuditSummary): SuggestedFix[] {
     return demoAudit.suggestedFixes;
   }
 
+  const actionItems = audit.report?.reportJson.actionPlan?.items;
+  if (actionItems?.length) {
+    return actionItems.map((item) => ({
+      title: item.suggestedChange,
+      owner: item.owner,
+      impact: `${item.priority} · ${item.title}`
+    }));
+  }
+
   return audit.issues.map((issue) => ({
     title: issue.suggestedFix ?? `Review ${issue.category.toLowerCase()} friction`,
     owner: issue.category.includes("Mobile") || issue.category.includes("Validation") ? "Frontend" : "Product + Engineering",
@@ -95,6 +104,38 @@ export function bugReportForAudit(audit: AuditSummary) {
   }
 
   return audit.report?.markdown ?? `## SwarmProof findings\n\n${audit.issues.map((issue) => `- ${issue.severity}: ${issue.title}`).join("\n")}`;
+}
+
+export function actionPlanMarkdownForAudit(audit: AuditSummary) {
+  const actionPlan = audit.report?.reportJson.actionPlan;
+  if (!actionPlan) {
+    return `# SwarmProof PR suggestion\n\nNo action plan has been generated for this audit yet.`;
+  }
+
+  return `# ${actionPlan.pullRequestDraft.title}
+
+Suggested branch: \`${actionPlan.pullRequestDraft.branchName}\`
+Confidence: ${Math.round(actionPlan.confidence * 100)}%
+Likely files:
+${actionPlan.pullRequestDraft.filesChanged.map((file) => `- \`${file}\``).join("\n")}
+
+## Summary
+${actionPlan.summary}
+
+## Suggested changes
+${actionPlan.items.map((item) => `### ${item.priority} · ${item.title}
+- Owner: ${item.owner}
+- Rationale: ${item.rationale}
+- Suggested change: ${item.suggestedChange}
+- Evidence steps: ${item.evidenceStepIds.join(", ") || "report-level evidence"}
+- Acceptance criteria:
+${item.acceptanceCriteria.map((criterion) => `  - ${criterion}`).join("\n")}`).join("\n\n")}
+
+## Draft PR body
+${actionPlan.pullRequestDraft.body}
+
+## Limitations
+${actionPlan.pullRequestDraft.limitations.map((limitation) => `- ${limitation}`).join("\n")}`;
 }
 
 export function auditSuccessRate(audit: AuditSummary) {

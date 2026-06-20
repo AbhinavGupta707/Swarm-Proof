@@ -1,5 +1,5 @@
 import { createAiProvider, externalActionPlannerSystemPrompt, type AiProvider } from "@swarmproof/ai";
-import { personaProfileForMode, type ObservedActionCandidate, type ObservedActionCategory, type ObservedActionKind, type PersonaMode } from "@swarmproof/types";
+import { personaProfileForMode, type GoalTopicFocus, type ObservedActionCandidate, type ObservedActionCategory, type ObservedActionKind, type PersonaMode } from "@swarmproof/types";
 import { shouldSkipExternalAction } from "./safety";
 
 export type ExternalCandidateKind = ObservedActionKind;
@@ -46,8 +46,10 @@ export function planExternalAction(input: PlanExternalActionInput): PlannedExter
   const visited = new Set((input.visitedHrefs ?? []).map(normalizeUrlKey));
   const usedOrdinals = new Set(input.usedOrdinals ?? []);
   const goalTokens = meaningfulTokens(input.goal);
+  const topicFocus = topicFocusForGoal(input.goal);
   const context = {
     goalTokens,
+    topicFocus,
     personaMode: input.personaMode,
     allowFormActions: Boolean(input.allowFormActions),
     visited,
@@ -161,6 +163,7 @@ function validateAiDecision(
   const usedOrdinals = new Set(input.usedOrdinals ?? []);
   const scored = scoreCandidate(candidate, {
     goalTokens: meaningfulTokens(input.goal),
+    topicFocus: topicFocusForGoal(input.goal),
     personaMode: input.personaMode,
     allowFormActions: Boolean(input.allowFormActions),
     visited,
@@ -181,6 +184,7 @@ function scoreCandidates(
   candidates: ExternalCandidate[],
   context: {
     goalTokens: string[];
+    topicFocus?: GoalTopicFocus;
     personaMode: PersonaMode;
     allowFormActions: boolean;
     visited: Set<string>;
@@ -226,6 +230,7 @@ function scoreCandidate(
   candidate: ExternalCandidate,
   context: {
     goalTokens: string[];
+    topicFocus?: GoalTopicFocus;
     personaMode: PersonaMode;
     allowFormActions: boolean;
     visited: Set<string>;
@@ -253,8 +258,10 @@ function scoreCandidate(
   const matchedGoalTokens = context.goalTokens.filter((token) => lowerLabel.includes(token));
   const sectionText = normalizeLabel(`${candidate.sectionLabel ?? ""} ${candidate.nearbyText ?? ""}`).toLowerCase();
   const matchedContextTokens = context.goalTokens.filter((token) => sectionText.includes(token) && !lowerLabel.includes(token));
+  const topicScore = topicScoreForCandidate(context.topicFocus, `${label} ${candidate.href ?? ""} ${sectionText}`, category);
   score += matchedGoalTokens.length * 7;
   score += matchedContextTokens.length * 3;
+  score += topicScore.delta;
 
   if (/\b(get started|start|try|demo|learn|learn more|docs|documentation|pricing|create|invite|join|shop|buy|compare|customize|choose|select|configure)\b/i.test(label)) {
     score += 8;
@@ -291,6 +298,8 @@ function scoreCandidate(
       ? `Best safe ${category} candidate matched goal token(s): ${matchedGoalTokens.slice(0, 3).join(", ")}.`
       : matchedContextTokens.length > 0
         ? `Best safe ${category} candidate appeared near goal context: ${matchedContextTokens.slice(0, 3).join(", ")}.`
+        : topicScore.reason
+          ? topicScore.reason
         : `Best safe ${category} exploratory candidate: ${label}.`
   };
 }
@@ -407,12 +416,75 @@ function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: st
       "Do not choose Signup, Login, Start Deploying, Add to Cart, Add to Bag, Checkout, Place Order, Pay, Contact Sales, Book Demo, Start Trial, Create Account, credential, payment, or private-data actions.",
       "If only unsafe commitment actions remain, return observe with a truthful safety reason."
     ],
+    topicFocus: topicFocusForGoal(input.goal),
     goal: input.goal,
     persona,
     page: input.page,
     history: (input.history ?? []).slice(-8),
     candidates
   });
+}
+
+function topicFocusForGoal(goal: string): GoalTopicFocus | undefined {
+  const normalized = normalizeLabel(goal).toLowerCase();
+  if (/\bmacbook\s+air\b/.test(normalized)) {
+    return {
+      label: "MacBook Air",
+      requiredTerms: ["macbook air"],
+      relatedTerms: ["mac", "macbook"],
+      excludedTerms: ["iphone", "ipad", "airpods", "apple watch", "watch", "vision pro", "iphone accessories"]
+    };
+  }
+  if (/\bmacbook\s+pro\b/.test(normalized)) {
+    return {
+      label: "MacBook Pro",
+      requiredTerms: ["macbook pro"],
+      relatedTerms: ["mac", "macbook"],
+      excludedTerms: ["iphone", "ipad", "airpods", "apple watch", "watch", "vision pro", "iphone accessories"]
+    };
+  }
+  if (/\bnext(?:\.|\s|-)?js\b|\bnextjs\b/.test(normalized)) {
+    return {
+      label: "Next.js",
+      requiredTerms: ["next.js", "nextjs"],
+      relatedTerms: ["next", "javascript", "react"],
+      excludedTerms: ["tanstack", "react native", "flutter", "swift", "android"]
+    };
+  }
+  return undefined;
+}
+
+function topicScoreForCandidate(topicFocus: GoalTopicFocus | undefined, candidateText: string, category: ExternalCandidateCategory) {
+  if (!topicFocus) {
+    return { delta: 0, reason: "" };
+  }
+
+  const normalized = candidateText.toLowerCase().replace(/\s+/g, " ").trim();
+  if (topicFocus.excludedTerms.some((term) => normalized.includes(term))) {
+    return {
+      delta: -40,
+      reason: `Candidate looked off-topic for ${topicFocus.label}.`
+    };
+  }
+  if (topicFocus.requiredTerms.some((term) => normalized.includes(term))) {
+    return {
+      delta: 16,
+      reason: `Best safe ${category} candidate explicitly matched ${topicFocus.label}.`
+    };
+  }
+  if (topicFocus.relatedTerms.some((term) => normalized.includes(term))) {
+    return {
+      delta: 6,
+      reason: `Best safe ${category} candidate stayed in the ${topicFocus.label} topic area.`
+    };
+  }
+  if (category === "commerce" || category === "product") {
+    return {
+      delta: -18,
+      reason: `Candidate did not show enough ${topicFocus.label} context.`
+    };
+  }
+  return { delta: 0, reason: "" };
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutValue: T): Promise<T> {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { personaProfileForMode } from "@swarmproof/types";
+import { personaProfileForMode, type GoalSpec } from "@swarmproof/types";
 import {
   appendEvent,
   blockWorkerAuditRun,
@@ -199,9 +199,12 @@ test("evidence report synthesis links worker steps, artifacts, bug export, and g
   assert.match(overview.report?.markdown ?? "", /## Persona comparison/);
   assert.match(overview.report?.markdown ?? "", /## Limitations/);
   assert.match(overview.report?.markdown ?? "", /## Product recommendations/);
+  assert.match(overview.report?.markdown ?? "", /## PR-ready suggestion brief/);
   assert.match(overview.report?.markdown ?? "", /## Reproduction evidence/);
   assert.match(overview.report?.markdown ?? "", /## Bug export/);
   assert.match(overview.report?.markdown ?? "", /Invite teammate CTA is hard to recognize/);
+  assert.equal(overview.report?.reportJson.actionPlan?.items[0]?.title, "Invite teammate CTA is hard to recognize");
+  assert.match(overview.report?.reportJson.actionPlan?.pullRequestDraft.body ?? "", /Acceptance criteria/);
   assert.match(overview.report?.markdown ?? "", /normal step 1, warning/);
   assert.match(overview.report?.markdown ?? "", new RegExp(step.artifactId ?? "artifact_"));
   assert.equal(overview.report?.markdown.includes("ZmFrZS1wbmc="), false);
@@ -302,8 +305,10 @@ test("external evidence reports and generated tests use target-specific evidence
   assert.match(overview.report?.markdown ?? "", /Stop reason/);
   assert.match(overview.report?.markdown ?? "", /This is a bounded public-URL audit/);
   assert.match(overview.report?.markdown ?? "", /Product recommendations/);
+  assert.match(overview.report?.markdown ?? "", /PR-ready suggestion brief/);
   assert.match(overview.report?.markdown ?? "", /User impact/);
   assert.match(overview.report?.markdown ?? "", /Regression-test note/);
+  assert.equal(overview.report?.reportJson.actionPlan?.items.length && overview.report.reportJson.actionPlan.items.length > 0, true);
   assert.match(overview.generatedTest, /Buy MacBook Air/);
   assert.match(overview.generatedTest, /Customize/);
   assert.doesNotMatch(overview.generatedTest, /project|people|invite|error/i);
@@ -462,6 +467,107 @@ test("verifier result is required for a clean external pass", () => {
   assert.equal(clean.report?.outcome, "pass");
   assert.match(clean.generatedTest, /MacBook Air|Compare MacBook Air/i);
   assert.doesNotMatch(clean.generatedTest, /project|people|invite/i);
+});
+
+test("goal drift produces PR-ready guidance and is excluded from generated regression tests", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://www.apple.com/macbook-air/",
+    goal: "Compare MacBook Air pricing and configuration choices.",
+    modes: ["normal"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const runId = plan.runIds[0];
+  assert.ok(runId);
+
+  const goalSpec = {
+    version: 1,
+    goal: "Compare MacBook Air pricing and configuration choices.",
+    personaMode: "normal",
+    personaInterpretation: "Normal evaluator: compare the public product choices.",
+    topicFocus: {
+      label: "MacBook Air",
+      requiredTerms: ["macbook air"],
+      relatedTerms: ["mac", "macbook"],
+      excludedTerms: ["iphone", "ipad", "airpods", "apple watch", "watch", "vision pro", "iphone accessories"]
+    },
+    mustFind: [],
+    niceToFind: [],
+    forbiddenActions: [],
+    successRubric: [],
+    stopConditions: [],
+    allowedScope: {
+      origin: "https://www.apple.com",
+      sameOriginOnly: true,
+      allowFormActions: false,
+      notes: []
+    },
+    compiledBy: "deterministic"
+  } satisfies GoalSpec;
+
+  const onTopic = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 1,
+    action: "goto",
+    status: "passed",
+    thought: "Open MacBook Air product page.",
+    result: "Loaded MacBook Air pricing overview.",
+    url: "https://www.apple.com/macbook-air/",
+    goalSpec
+  });
+
+  const offTopic = recordWorkerStep({
+    auditId: created.audit.id,
+    runId,
+    stepIndex: 2,
+    action: "click_link",
+    status: "warning",
+    thought: "Planner followed a generic shop link.",
+    result: "Navigated to iPhone accessories instead of MacBook Air comparison.",
+    url: "https://www.apple.com/shop/iphone/accessories",
+    goalSpec
+  });
+
+  const summary = completeWorkerRun({
+    auditId: created.audit.id,
+    runId,
+    success: false,
+    status: "BLOCKED",
+    summary: "The run drifted away from MacBook Air evidence.",
+    goalSpec,
+    verifierResult: {
+      verdict: "BLOCKED",
+      confidence: 0.92,
+      metRequirements: [{ id: "product_macbook_air", label: "MacBook Air product identity", evidence: ["Loaded MacBook Air pricing overview."] }],
+      missingRequirements: [{ id: "intent_configuration", label: "Configuration or option evidence", evidence: [] }],
+      explanation: "Blocked by safety evidence: Topic drift: latest evidence is about iphone instead of MacBook Air.",
+      supportingStepIds: [onTopic.id],
+      safetyFailures: ["Topic drift: latest evidence is about iphone instead of MacBook Air."],
+      judge: { used: false, provider: "deterministic" }
+    },
+    issues: [{
+      severity: "MEDIUM",
+      category: "Goal drift",
+      title: "Agent drifted away from the requested goal",
+      description: "The agent moved from MacBook Air evidence to iPhone accessories.",
+      evidenceStepIds: [onTopic.id, offTopic.id],
+      suggestedFix: "Keep navigation and comparison CTAs anchored to MacBook Air before allowing broader shop exploration."
+    }]
+  });
+
+  assert.equal(summary.report?.outcome, "partial");
+  assert.equal(summary.report?.reportJson.actionPlan?.title, "Goal-drift fix PR suggestion");
+  assert.equal(summary.report?.reportJson.actionPlan?.items[0]?.title, "Keep the agent path anchored to the requested product");
+  assert.match(summary.report?.reportJson.actionPlan?.pullRequestDraft.body ?? "", /Generated tests do not replay off-topic navigation/);
+  assert.match(summary.generatedTest, /MacBook Air/);
+  assert.doesNotMatch(summary.generatedTest, /iPhone|accessories/i);
 });
 
 test("external report synthesis compares persona stories and divergence", () => {

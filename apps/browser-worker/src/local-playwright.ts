@@ -582,6 +582,18 @@ function formatVerifierResult(verifier: EvidenceVerifierResult) {
 
 function issueForVerifier(verifier: EvidenceVerifierResult, state: EvidenceState): WorkerIssueCallback {
   if (verifier.safetyFailures.length > 0) {
+    const driftFailure = verifier.safetyFailures.find((failure) => /topic drift/i.test(failure));
+    if (driftFailure) {
+      return {
+        severity: "MEDIUM",
+        category: "Goal drift",
+        title: "Agent drifted away from the requested goal",
+        description: verifier.explanation,
+        evidenceStepIds: [...state.stepIds],
+        suggestedFix: "Keep public navigation labels and related calls to action anchored to the selected product or topic, and avoid generic commerce paths that jump to unrelated catalog areas."
+      };
+    }
+
     return {
       severity: "MEDIUM",
       category: "Auth-limited flow",

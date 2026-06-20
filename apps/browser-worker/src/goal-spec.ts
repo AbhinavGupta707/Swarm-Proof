@@ -24,6 +24,7 @@ export function compileGoalSpec(input: CompileGoalSpecInput): GoalSpec {
     goal,
     personaMode: input.personaMode,
     personaInterpretation: sanitizeText(`${persona.name}: ${persona.goalInterpretation}`, 260),
+    topicFocus: topicFocusFor(normalizedGoal),
     mustFind,
     niceToFind,
     forbiddenActions: forbiddenActionsFor(normalizedGoal),
@@ -52,6 +53,34 @@ export function compileGoalSpec(input: CompileGoalSpecInput): GoalSpec {
     },
     compiledBy: "deterministic"
   };
+}
+
+function topicFocusFor(normalizedGoal: string) {
+  if (/\bmacbook\s+air\b/.test(normalizedGoal)) {
+    return {
+      label: "MacBook Air",
+      requiredTerms: ["macbook air"],
+      relatedTerms: ["mac", "macbook"],
+      excludedTerms: ["iphone", "ipad", "airpods", "apple watch", "watch", "vision pro", "iphone accessories"]
+    };
+  }
+  if (/\bmacbook\s+pro\b/.test(normalizedGoal)) {
+    return {
+      label: "MacBook Pro",
+      requiredTerms: ["macbook pro"],
+      relatedTerms: ["mac", "macbook"],
+      excludedTerms: ["iphone", "ipad", "airpods", "apple watch", "watch", "vision pro", "iphone accessories"]
+    };
+  }
+  if (/\bnext(?:\.|\s|-)?js\b|\bnextjs\b/.test(normalizedGoal)) {
+    return {
+      label: "Next.js",
+      requiredTerms: ["next.js", "nextjs"],
+      relatedTerms: ["next", "javascript", "react"],
+      excludedTerms: ["tanstack", "react native", "flutter", "swift", "android"]
+    };
+  }
+  return undefined;
 }
 
 function specificProductRequirements(normalizedGoal: string): EvidenceRequirement[] {

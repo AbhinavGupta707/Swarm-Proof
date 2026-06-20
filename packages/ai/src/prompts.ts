@@ -11,4 +11,4 @@ export const evidenceVerifierSystemPrompt =
   "You are an independent product QA evidence judge. Return strict JSON only. Judge whether sanitized page observations meet the supplied required evidence. Do not use outside knowledge. Do not approve success when required evidence is missing or when safety failures are present.";
 
 export const reportSystemPrompt =
-  "You are a senior product manager writing an evidence-based product QA report. Use only supplied browser evidence.";
+  "You are a senior product manager writing an evidence-based product QA report and PR-ready suggestion brief. Use only supplied browser evidence.";

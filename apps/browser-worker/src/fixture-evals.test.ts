@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Page } from "playwright";
 import type { ObservedActionCandidate, PageObservation, PageRiskSignal } from "@swarmproof/types";
 import { verifyEvidence } from "./evidence-verifier";
-import { planExternalActionWithAi } from "./external-planner";
+import { planExternalAction, planExternalActionWithAi } from "./external-planner";
 import { compileGoalSpec } from "./goal-spec";
 import { externalRunCompletionFromVerifier } from "./local-playwright";
 import { observePage } from "./page-observation";
@@ -102,6 +102,76 @@ test("Valid Apple-like compare/pricing/configuration page satisfies required evi
   assert.equal(verifier.verdict, "SUCCEEDED");
   assert.equal(verifier.missingRequirements.length, 0);
   assert.equal(externalRunCompletionFromVerifier(verifier).status, "SUCCEEDED");
+});
+
+test("Apple topic drift cannot become a clean MacBook Air pass", () => {
+  const goalSpec = compileGoalSpec({ goal: appleGoal, targetUrl: "https://apple-fixture.test/macbook-air", personaMode: "normal" });
+  const verifier = verifyEvidence({
+    goalSpec,
+    observations: [
+      fixtureObservation({
+        url: "https://apple-fixture.test/macbook-air",
+        title: "MacBook Air - Apple",
+        headings: ["MacBook Air"],
+        snippets: ["MacBook Air has 13-inch and 15-inch models. Compare MacBook Air configuration options."],
+        actions: [{ kind: "link", label: "Compare", href: "https://apple-fixture.test/macbook-air/compare", sameOrigin: true, ordinal: 0, category: "product" }]
+      }),
+      fixtureObservation({
+        url: "https://apple-fixture.test/shop/iphone/accessories",
+        title: "Buy iPhone Accessories - Apple",
+        headings: ["iPhone accessories"],
+        snippets: ["iPhone cases and accessories from $19. Choose colors and configure accessory options."],
+        actions: [{ kind: "link", label: "Compare iPhone accessories", href: "https://apple-fixture.test/shop/iphone/accessories", sameOrigin: true, ordinal: 1, category: "commerce" }]
+      })
+    ]
+  });
+
+  assert.equal(verifier.verdict, "BLOCKED");
+  assert.match(verifier.safetyFailures.join(" "), /Topic drift/);
+  assert.equal(externalRunCompletionFromVerifier(verifier).success, false);
+});
+
+test("Apple evidence must be coherent on one non-drift page", () => {
+  const goalSpec = compileGoalSpec({ goal: appleGoal, targetUrl: "https://apple-fixture.test/macbook-air", personaMode: "normal" });
+  const verifier = verifyEvidence({
+    goalSpec,
+    observations: [
+      fixtureObservation({
+        url: "https://apple-fixture.test/macbook-air",
+        title: "MacBook Air - Apple",
+        headings: ["MacBook Air"],
+        snippets: ["Compare MacBook Air models and choose chip, memory, and storage."],
+        actions: [{ kind: "link", label: "Compare MacBook Air", href: "https://apple-fixture.test/macbook-air/compare", sameOrigin: true, ordinal: 0, category: "product" }]
+      }),
+      fixtureObservation({
+        url: "https://apple-fixture.test/shop/accessories",
+        title: "Accessories - Apple",
+        headings: ["Accessories"],
+        snippets: ["Accessories from $19. Select color and storage cases."],
+        actions: [{ kind: "link", label: "Shop accessories", href: "https://apple-fixture.test/shop/accessories", sameOrigin: true, ordinal: 1, category: "commerce" }]
+      })
+    ]
+  });
+
+  assert.equal(verifier.verdict, "PARTIAL");
+  assert.equal(verifier.missingRequirements.some((item) => item.id === "coherent_goal_evidence"), true);
+  assert.equal(externalRunCompletionFromVerifier(verifier).success, false);
+});
+
+test("Apple planner avoids off-topic commerce candidates", () => {
+  const plan = planExternalAction({
+    goal: appleGoal,
+    personaMode: "normal",
+    candidates: [
+      { kind: "link", label: "Shop for Business", href: "https://apple-fixture.test/iphone-17-pro", sameOrigin: true, ordinal: 0, category: "commerce" },
+      { kind: "link", label: "Compare MacBook Air models", href: "https://apple-fixture.test/macbook-air/compare", sameOrigin: true, ordinal: 1, category: "product" }
+    ]
+  });
+
+  assert.equal(plan.type, "click");
+  if (plan.type === "click") {
+    assert.equal(plan.candidate.ordinal, 1);
+  }
 });
 
 test("Supabase TanStack and AI prompt trap does not satisfy Next.js install quickstart", () => {
