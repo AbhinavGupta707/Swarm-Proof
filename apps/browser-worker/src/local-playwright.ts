@@ -395,6 +395,11 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       break;
     }
 
+    if (hasGoalEvidenceForExternalRun(input.goal, page.url(), await safeTitleText(page), history)) {
+      history.push(`Goal evidence reached on ${redactUrl(page.url())}.`);
+      break;
+    }
+
     const authWall = await withFallbackTimeout(
       detectAuthWall(page),
       5_000,
@@ -849,6 +854,22 @@ export function shouldFollowSafeHrefFallback(beforeUrl: string, afterUrl: string
   );
 }
 
+export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: string, history: string[] = []) {
+  const haystack = `${url} ${title} ${history.join(" ")}`.toLowerCase();
+  const tokens = goal
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((token) => token.length >= 4 && !EXTERNAL_GOAL_STOP_WORDS.has(token));
+
+  return tokens.some((token) => {
+    if (haystack.includes(token)) return true;
+    if (token.startsWith("deploy") && /\bdeploy/.test(haystack)) return true;
+    if ((token === "documentation" || token === "docs") && /\b(docs|documentation)\b/.test(haystack)) return true;
+    if (token === "templates" && /\b(template|templates)\b/.test(haystack)) return true;
+    return false;
+  });
+}
+
 async function withFallbackTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   promise.catch(() => undefined);
@@ -863,6 +884,28 @@ async function withFallbackTimeout<T>(promise: Promise<T>, timeoutMs: number, fa
     if (timer) clearTimeout(timer);
   }
 }
+
+const EXTERNAL_GOAL_STOP_WORDS = new Set([
+  "want",
+  "understand",
+  "explore",
+  "public",
+  "only",
+  "stop",
+  "before",
+  "signup",
+  "login",
+  "creating",
+  "project",
+  "payment",
+  "contact",
+  "sales",
+  "book",
+  "demo",
+  "private",
+  "data",
+  "works"
+]);
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutError: Error): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
