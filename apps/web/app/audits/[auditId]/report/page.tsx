@@ -157,9 +157,9 @@ export default async function ReportPage({ params }: { params: Promise<{ auditId
                 score={audit.score}
                 outcome={report?.outcome ?? audit.status}
               />
-              <p className="rounded-ui bg-crimson/10 p-3 text-sm leading-6 text-crimson">
-                <AlertTriangle className="mr-1 inline h-4 w-4" aria-hidden="true" />
-                No private URLs, credentials, screenshots, or raw target-page text are sent to Novus events.
+              <p className="rounded-ui bg-mist p-3 text-sm leading-6 text-slate-600">
+                <AlertTriangle className="mr-1 inline h-4 w-4 text-indigo" aria-hidden="true" />
+                Event telemetry is privacy-safe: no private URLs, credentials, screenshots, or raw target-page text are sent to analytics.
               </p>
             </div>
           </div>

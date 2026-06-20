@@ -50,12 +50,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </nav>
         </header>
         {children}
-        <footer className="border-t border-line bg-panel">
-          <div className="page-shell flex flex-wrap items-center justify-between gap-3 py-6 text-sm text-slate-600">
-            <p>Built for the June 20, 2026 5:00 PM BST hackathon deadline.</p>
-            <p>Deterministic demo mode keeps the public path reliable.</p>
-          </div>
-        </footer>
       </body>
     </html>
   );
