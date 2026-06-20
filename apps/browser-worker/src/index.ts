@@ -41,6 +41,7 @@ const server = createServer(async (request, response) => {
 server.listen(port, () => {
   console.log(`SwarmProof browser worker listening on http://localhost:${port}`);
   console.log(`Provider: ${activeProvider()}`);
+  console.log(`AI planner configured: ${Boolean(process.env.FIREWORKS_API_KEY)} (${fireworksModel()})`);
   console.log(`Registered personas: ${defaultPersonas.map((persona) => persona.mode).join(", ")}`);
 });
 
@@ -111,6 +112,8 @@ function workerHealth(): WorkerHealthSummary {
     service: "swarmproof-browser-worker",
     provider: activeProvider(),
     playwrightAvailable: isPlaywrightPackageAvailable(),
+    aiPlannerConfigured: Boolean(process.env.FIREWORKS_API_KEY),
+    aiModel: fireworksModel(),
     personas: defaultPersonas.map((persona) => persona.mode),
     queueDepth: queuedRuns.length,
     activeRuns: activeRunCount
@@ -119,6 +122,10 @@ function workerHealth(): WorkerHealthSummary {
 
 function activeProvider(): WorkerHealthSummary["provider"] {
   return process.env.BROWSER_PROVIDER === "local-playwright" ? "local-playwright" : "deterministic-demo";
+}
+
+function fireworksModel() {
+  return process.env.FIREWORKS_MODEL ?? "accounts/fireworks/models/deepseek-v3p1";
 }
 
 function callbackPoster(callbackBaseUrl: string): CallbackPoster {

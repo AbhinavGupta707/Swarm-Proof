@@ -64,6 +64,8 @@ export type WorkerHealthSummary = {
   service: "swarmproof-browser-worker";
   provider: "deterministic-demo" | "local-playwright";
   playwrightAvailable: boolean;
+  aiPlannerConfigured?: boolean;
+  aiModel?: string;
   personas: string[];
   queueDepth?: number;
   activeRuns?: number;

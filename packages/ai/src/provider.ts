@@ -6,6 +6,7 @@ export function createAiProvider(): AiProvider {
   return {
     async generateJson<T>({ system, prompt, fallback }: { system: string; prompt: string; fallback: T }): Promise<T> {
       const apiKey = process.env.FIREWORKS_API_KEY;
+      const model = process.env.FIREWORKS_MODEL ?? "accounts/fireworks/models/deepseek-v3p1";
       if (!apiKey) {
         return fallback;
       }
@@ -18,7 +19,7 @@ export function createAiProvider(): AiProvider {
             "content-type": "application/json"
           },
           body: JSON.stringify({
-            model: process.env.FIREWORKS_MODEL ?? "accounts/fireworks/models/deepseek-v3p1",
+            model,
             response_format: { type: "json_object" },
             temperature: 0.2,
             max_tokens: 1200,
@@ -30,6 +31,7 @@ export function createAiProvider(): AiProvider {
         });
 
         if (!response.ok) {
+          console.warn(`Fireworks JSON generation failed: ${response.status} ${response.statusText}; model=${model}`);
           return fallback;
         }
 
@@ -38,11 +40,13 @@ export function createAiProvider(): AiProvider {
         };
         const content = json.choices?.[0]?.message?.content;
         if (!content) {
+          console.warn(`Fireworks JSON generation returned no message content; model=${model}`);
           return fallback;
         }
 
         return JSON.parse(content) as T;
-      } catch {
+      } catch (error) {
+        console.warn(`Fireworks JSON generation fell back: ${error instanceof Error ? error.message : "unknown error"}; model=${model}`);
         return fallback;
       }
     }
