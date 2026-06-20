@@ -50,9 +50,9 @@ test("external run can stop once a goal-relevant public page is reached", () => 
   assert.equal(
     hasGoalEvidenceForExternalRun(
       "Understand pricing and deploying a Next.js app from public docs.",
-      "https://vercel.com/docs/frameworks/full-stack/tanstack-start",
-      "TanStack Start on Vercel",
-      ["Clicked docs framework link."]
+      "https://vercel.com/docs/frameworks/nextjs",
+      "Next.js on Vercel",
+      ["Clicked Next.js deployment docs framework link."]
     ),
     true
   );
@@ -67,5 +67,35 @@ test("external run does not stop on generic pages without goal evidence", () => 
       []
     ),
     false
+  );
+  assert.equal(
+    hasGoalEvidenceForExternalRun(
+      "Find how to install Supabase in a Next.js app and understand the quickest setup path.",
+      "https://supabase.com/docs/guides/ai-tools/ai-prompts",
+      "AI Prompts | Supabase Docs",
+      ["Clicked Start with Supabase AI prompts."]
+    ),
+    false
+  );
+});
+
+test("external run accepts specific install or comparison goal evidence", () => {
+  assert.equal(
+    hasGoalEvidenceForExternalRun(
+      "Find how to install Supabase in a Next.js app and understand the quickest setup path.",
+      "https://supabase.com/docs/guides/getting-started/quickstarts/nextjs",
+      "Use Supabase with Next.js",
+      ["Clicked Next.js quickstart and install guide."]
+    ),
+    true
+  );
+  assert.equal(
+    hasGoalEvidenceForExternalRun(
+      "Compare MacBook Air options and understand which model fits me.",
+      "https://www.apple.com/mac/compare/",
+      "Compare Mac Models - Apple",
+      ["Clicked Compare Mac models."]
+    ),
+    true
   );
 });

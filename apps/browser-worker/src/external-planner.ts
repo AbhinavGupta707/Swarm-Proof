@@ -509,5 +509,10 @@ const STOP_WORDS = new Set([
   "flow",
   "page",
   "product",
-  "website"
+  "website",
+  "information",
+  "supabase",
+  "vercel",
+  "apple",
+  "stripe"
 ]);

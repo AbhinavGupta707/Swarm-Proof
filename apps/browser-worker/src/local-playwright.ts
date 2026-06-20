@@ -904,18 +904,46 @@ export function shouldFollowSafeHrefFallback(beforeUrl: string, afterUrl: string
 
 export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: string, history: string[] = []) {
   const haystack = `${url} ${title} ${history.join(" ")}`.toLowerCase();
+  const hostTokens = hostTokensFor(url);
   const tokens = goal
     .toLowerCase()
     .split(/\W+/)
-    .filter((token) => token.length >= 4 && !EXTERNAL_GOAL_STOP_WORDS.has(token));
+    .filter((token) => token.length >= 4 && !EXTERNAL_GOAL_STOP_WORDS.has(token) && !hostTokens.has(token));
 
-  return tokens.some((token) => {
-    if (haystack.includes(token)) return true;
-    if (token.startsWith("deploy") && /\bdeploy/.test(haystack)) return true;
-    if ((token === "documentation" || token === "docs") && /\b(docs|documentation)\b/.test(haystack)) return true;
-    if (token === "templates" && /\b(template|templates)\b/.test(haystack)) return true;
+  const matches = tokens.filter((token) => {
+    if (tokenMatchesEvidence(token, haystack)) return true;
     return false;
   });
+
+  if (matches.length >= 2) {
+    return true;
+  }
+
+  return matches.some((token) => HIGH_INTENT_GOAL_TOKENS.has(normalizeGoalToken(token)));
+}
+
+function tokenMatchesEvidence(token: string, haystack: string) {
+  const normalized = normalizeGoalToken(token);
+  if (haystack.includes(token) || haystack.includes(normalized)) return true;
+  if (normalized === "deploy" && /\bdeploy/.test(haystack)) return true;
+  if (normalized === "template" && /\b(template|templates)\b/.test(haystack)) return true;
+  return false;
+}
+
+function normalizeGoalToken(token: string) {
+  if (token === "documentation") return "docs";
+  if (token.startsWith("deploy")) return "deploy";
+  if (token.startsWith("template")) return "template";
+  if (token === "models") return "model";
+  return token;
+}
+
+function hostTokensFor(rawUrl: string) {
+  try {
+    return new Set(new URL(rawUrl).hostname.toLowerCase().split(/\W+/).filter((token) => token.length >= 4));
+  } catch {
+    return new Set<string>();
+  }
 }
 
 function formatPlanThought(plan: PlannedExternalAction) {
@@ -971,7 +999,25 @@ const EXTERNAL_GOAL_STOP_WORDS = new Set([
   "demo",
   "private",
   "data",
-  "works"
+  "works",
+  "docs",
+  "documentation",
+  "product",
+  "website",
+  "information",
+  "quickest"
+]);
+
+const HIGH_INTENT_GOAL_TOKENS = new Set([
+  "compare",
+  "pricing",
+  "install",
+  "quickstart",
+  "next",
+  "nextjs",
+  "deploy",
+  "template",
+  "macbook"
 ]);
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutError: Error): Promise<T> {
