@@ -1273,6 +1273,10 @@ test("persistence config selects memory, postgres, and Supabase REST adapters", 
 
     process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
     process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
+    assert.equal(getPersistenceConfig().mode, "postgres");
+    assert.equal(getDatabaseStatus().activeAdapter, "postgres");
+
+    process.env.SWARMPROOF_PERSISTENCE = "supabase-rest";
     assert.equal(getPersistenceConfig().mode, "supabase-rest");
     assert.equal(getDatabaseStatus().activeAdapter, "supabase-rest");
 

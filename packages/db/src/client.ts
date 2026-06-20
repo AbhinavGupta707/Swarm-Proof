@@ -36,7 +36,5 @@ function resolvePersistenceMode(): PersistenceMode {
     return override;
   }
 
-  return process.env.SUPABASE_SERVICE_ROLE_KEY && (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL)
-    ? "supabase-rest"
-    : "postgres";
+  return "postgres";
 }

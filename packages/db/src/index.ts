@@ -94,6 +94,7 @@ declare global {
 const UNSAFE_EVENT_KEYS = ["url", "content", "screenshot", "secret", "token", "password", "email", "credential"];
 const FINAL_RUN_STATUSES: RunStatus[] = ["SUCCEEDED", "FAILED", "BLOCKED", "TIMED_OUT"];
 const SUPABASE_REST_MUTATION_RETRIES = 5;
+const DEFAULT_SUPABASE_REST_TIMEOUT_MS = 12_000;
 const DEFAULT_PERSONA_TIMEOUT_MS = 75_000;
 const DEFAULT_AUDIT_TIMEOUT_MS = 210_000;
 const EVENTS_RESPONSE_LIMIT = 100;
@@ -111,7 +112,7 @@ export function getDatabaseStatus() {
     note: activeAdapter === "postgres"
       ? "DATABASE_URL is configured; using the Postgres audit snapshot adapter with memory fallback for local tests."
       : activeAdapter === "supabase-rest"
-        ? "DATABASE_URL and Supabase service credentials are configured; using the Supabase REST audit snapshot adapter."
+        ? "SWARMPROOF_PERSISTENCE=supabase-rest is configured; using the Supabase REST audit snapshot adapter."
       : "DATABASE_URL is absent; using deterministic memory fallback."
   };
 }
@@ -569,7 +570,6 @@ async function ensurePostgresPersistence() {
       )
     `);
     await pool.query("CREATE INDEX IF NOT EXISTS swarmproof_audit_snapshots_share_token_idx ON swarmproof_audit_snapshots (share_token) WHERE share_token IS NOT NULL");
-    await pool.query("CREATE INDEX IF NOT EXISTS swarmproof_audit_snapshots_data_gin_idx ON swarmproof_audit_snapshots USING gin (data)");
   })();
 
   await globalThis.__swarmproofPgReady;
@@ -611,7 +611,7 @@ function getPersistenceBackend(): PersistenceBackend {
     return override;
   }
 
-  return getSupabaseRestConfig() ? "supabase-rest" : "postgres";
+  return "postgres";
 }
 
 function getSupabaseRestConfig(): SupabaseRestConfig | undefined {
@@ -630,17 +630,32 @@ async function supabaseRest<T>(path: string, init: SupabaseRestInit = {}): Promi
     throw new Error("Supabase REST persistence requires NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL plus SUPABASE_SERVICE_ROLE_KEY.");
   }
 
-  const response = await fetch(`${config.url}/rest/v1${path}`, {
-    method: init.method ?? "GET",
-    headers: {
-      apikey: config.serviceRoleKey,
-      authorization: `Bearer ${config.serviceRoleKey}`,
-      "content-type": "application/json",
-      ...init.headers
-    },
-    body: init.body,
-    cache: "no-store"
-  });
+  const timeoutMs = Number(process.env.SWARMPROOF_SUPABASE_REST_TIMEOUT_MS ?? DEFAULT_SUPABASE_REST_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+
+  try {
+    response = await fetch(`${config.url}/rest/v1${path}`, {
+      method: init.method ?? "GET",
+      headers: {
+        apikey: config.serviceRoleKey,
+        authorization: `Bearer ${config.serviceRoleKey}`,
+        "content-type": "application/json",
+        ...init.headers
+      },
+      body: init.body,
+      cache: "no-store",
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Supabase REST persistence timed out after ${timeoutMs}ms. Use SWARMPROOF_PERSISTENCE=postgres for live audits.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const message = await response.text();

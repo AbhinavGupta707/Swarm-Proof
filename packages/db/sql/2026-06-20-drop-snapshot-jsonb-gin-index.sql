@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS swarmproof_audit_snapshots_data_gin_idx;
+
+ANALYZE swarmproof_audit_snapshots;
