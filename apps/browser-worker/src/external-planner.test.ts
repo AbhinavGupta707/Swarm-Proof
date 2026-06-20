@@ -155,6 +155,67 @@ test("AI planner cannot choose unsafe public action ordinals", async () => {
   assert.equal(plan.candidate.label, "Pricing");
 });
 
+test("deterministic planner returns persona reasoning and candidate context", () => {
+  const candidates: ExternalCandidate[] = [
+    {
+      kind: "link",
+      label: "Install with Next.js",
+      href: "https://supabase.com/docs/guides/getting-started/quickstarts/nextjs",
+      sameOrigin: true,
+      ordinal: 0,
+      sectionLabel: "Developer docs",
+      nearbyText: "Next.js quickstart and SDK installation",
+      category: "docs"
+    }
+  ];
+
+  const plan = planExternalAction({
+    goal: "Find how to install Supabase in a Next.js app.",
+    personaMode: "normal",
+    candidates
+  });
+
+  assert.equal(plan.type, "click");
+  assert.match(plan.observation, /Install with Next\.js/);
+  assert.match(plan.personaReasoning, /Normal evaluator/);
+  assert.match(plan.expectedEvidence, /docs|same-origin/i);
+  assert.equal(plan.confidence > 0, true);
+});
+
+test("AI planner metadata survives validated safe decisions", async () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "link", label: "Pricing", href: "https://vercel.com/pricing", sameOrigin: true, ordinal: 0, category: "pricing" }
+  ];
+  const metadataPlanner = {
+    async generateJson<T>() {
+      return {
+        action: "choose_candidate",
+        ordinal: 0,
+        reason: "Pricing is the clearest safe evidence for plan comparison.",
+        observation: "The page exposes a Pricing navigation link.",
+        personaReasoning: "The mobile evaluator wants a direct public pricing path.",
+        expectedEvidence: "Pricing tiers and plan limits.",
+        confidence: 0.82
+      } as T;
+    }
+  };
+
+  const plan = await planExternalActionWithAi({
+    goal: "Understand Vercel pricing before signup.",
+    personaMode: "mobile",
+    candidates,
+    page: { url: "https://vercel.com", title: "Vercel" },
+    history: [],
+    aiProvider: metadataPlanner
+  });
+
+  assert.equal(plan.type, "click");
+  assert.equal(plan.observation, "The page exposes a Pricing navigation link.");
+  assert.equal(plan.personaReasoning, "The mobile evaluator wants a direct public pricing path.");
+  assert.equal(plan.expectedEvidence, "Pricing tiers and plan limits.");
+  assert.equal(plan.confidence, 0.82);
+});
+
 test("invalid AI planner output falls back to the safe deterministic planner", async () => {
   const candidates: ExternalCandidate[] = [
     { kind: "link", label: "Buy MacBook Air", href: "https://www.apple.com/shop/buy-mac/macbook-air", sameOrigin: true, ordinal: 0 },
@@ -178,4 +239,37 @@ test("invalid AI planner output falls back to the safe deterministic planner", a
   assert.equal(plan.type, "click");
   if (plan.type !== "click") throw new Error("Expected deterministic fallback click");
   assert.equal(plan.candidate.label, "Buy MacBook Air");
+  assert.match(plan.personaReasoning, /Normal evaluator/);
+});
+
+test("AI observe result keeps stop reason when no safe fallback exists", async () => {
+  const candidates: ExternalCandidate[] = [
+    { kind: "button", label: "Add to Bag", ordinal: 0, category: "unsafe" }
+  ];
+  const observePlanner = {
+    async generateJson<T>() {
+      return {
+        action: "observe",
+        reason: "Only commitment actions remain.",
+        observation: "The page shows Add to Bag.",
+        personaReasoning: "The chaos explorer must stop at the purchase boundary.",
+        expectedEvidence: "No further safe public evidence.",
+        stopReason: "Cart commitment is blocked.",
+        confidence: 0.9
+      } as T;
+    }
+  };
+
+  const plan = await planExternalActionWithAi({
+    goal: "Inspect product configuration and stop before checkout.",
+    personaMode: "chaos",
+    candidates,
+    page: { url: "https://www.apple.com/shop/buy-mac/macbook-air", title: "Buy MacBook Air" },
+    history: [],
+    aiProvider: observePlanner
+  });
+
+  assert.equal(plan.type, "none");
+  assert.equal(plan.stopReason, "Cart commitment is blocked.");
+  assert.match(plan.personaReasoning, /chaos explorer/i);
 });

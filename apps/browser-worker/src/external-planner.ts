@@ -1,8 +1,20 @@
 import { createAiProvider, externalActionPlannerSystemPrompt, type AiProvider } from "@swarmproof/ai";
-import type { PersonaMode } from "@swarmproof/types";
+import { personaProfileForMode, type PersonaMode } from "@swarmproof/types";
 import { shouldSkipExternalAction } from "./safety";
 
 export type ExternalCandidateKind = "link" | "button" | "input";
+export type ExternalCandidateCategory =
+  | "docs"
+  | "pricing"
+  | "product"
+  | "search"
+  | "navigation"
+  | "commerce"
+  | "support"
+  | "auth"
+  | "unsafe"
+  | "legal"
+  | "unknown";
 
 export type ExternalCandidate = {
   kind: ExternalCandidateKind;
@@ -12,14 +24,25 @@ export type ExternalCandidate = {
   sameOrigin?: boolean;
   inputType?: string;
   disabled?: boolean;
+  sectionLabel?: string;
+  nearbyText?: string;
+  category?: ExternalCandidateCategory;
+};
+
+type PlannerMetadata = {
+  observation: string;
+  personaReasoning: string;
+  expectedEvidence: string;
+  stopReason?: string;
+  confidence: number;
 };
 
 export type PlannedExternalAction =
-  | { type: "click"; candidate: ExternalCandidate; reason: string; score: number }
-  | { type: "fill"; candidate: ExternalCandidate; value: string; reason: string; score: number }
-  | { type: "done"; reason: string; evidence: string; score: number }
-  | { type: "fail"; reason: string; evidence: string; score: number }
-  | { type: "none"; reason: string; score: 0 };
+  | ({ type: "click"; candidate: ExternalCandidate; reason: string; score: number } & PlannerMetadata)
+  | ({ type: "fill"; candidate: ExternalCandidate; value: string; reason: string; score: number } & PlannerMetadata)
+  | ({ type: "done"; reason: string; evidence: string; score: number } & PlannerMetadata)
+  | ({ type: "fail"; reason: string; evidence: string; score: number } & PlannerMetadata)
+  | ({ type: "none"; reason: string; score: 0 } & PlannerMetadata);
 
 type PlanExternalActionInput = {
   goal: string;
@@ -35,6 +58,11 @@ type AiPlannerDecision = {
   ordinal?: number;
   reason?: string;
   evidence?: string;
+  observation?: string;
+  personaReasoning?: string;
+  expectedEvidence?: string;
+  stopReason?: string;
+  confidence?: number;
 };
 
 export function planExternalAction(input: PlanExternalActionInput): PlannedExternalAction {
@@ -55,11 +83,12 @@ export function planExternalAction(input: PlanExternalActionInput): PlannedExter
     return {
       type: "none",
       reason: "No safe same-origin, goal-relevant action was available.",
-      score: 0
+      score: 0,
+      ...fallbackMetadata(input.personaMode, "Visible controls did not produce a safe, goal-relevant action.", "No safe evidence can be collected from the available candidates.", "No safe same-origin, goal-relevant action was available.", 0.3)
     };
   }
 
-  return planForScoredCandidate(best, input.goal);
+  return planForScoredCandidate(best, input.goal, input.personaMode);
 }
 
 export async function planExternalActionWithAi(input: PlanExternalActionInput & {
@@ -102,6 +131,7 @@ function validateAiDecision(
   }
 
   const reason = normalizeReason(decision.reason);
+  const aiMetadata = metadataFromDecision(decision, input.personaMode);
   if (decision.action === "observe") {
     if (isExecutableExternalPlan(fallback)) {
       return fallback;
@@ -110,7 +140,9 @@ function validateAiDecision(
     return {
       type: "none",
       reason: reason || "AI planner chose to observe rather than execute a public-site action.",
-      score: 0
+      score: 0,
+      ...aiMetadata,
+      stopReason: aiMetadata.stopReason || reason || "Planner observed but did not select a safe executable action."
     };
   }
 
@@ -119,7 +151,9 @@ function validateAiDecision(
       type: "done",
       reason,
       evidence: normalizeReason(decision.evidence) || reason,
-      score: 100
+      score: 100,
+      ...aiMetadata,
+      stopReason: aiMetadata.stopReason || reason
     };
   }
 
@@ -128,7 +162,9 @@ function validateAiDecision(
       type: "fail",
       reason,
       evidence: normalizeReason(decision.evidence) || reason,
-      score: 0
+      score: 0,
+      ...aiMetadata,
+      stopReason: aiMetadata.stopReason || reason
     };
   }
 
@@ -156,8 +192,9 @@ function validateAiDecision(
 
   return planForScoredCandidate({
     ...scored,
-    reason: reason || `AI chose validated candidate: ${scored.candidate.label}.`
-  }, input.goal);
+    reason: reason || `AI chose validated candidate: ${scored.candidate.label}.`,
+    metadata: aiMetadata
+  }, input.goal, input.personaMode);
 }
 
 function scoreCandidates(
@@ -176,14 +213,16 @@ function scoreCandidates(
     .sort((left, right) => right.score - left.score);
 }
 
-function planForScoredCandidate(scored: ScoredCandidate, goal: string): PlannedExternalAction {
+function planForScoredCandidate(scored: ScoredCandidate, goal: string, personaMode: PersonaMode): PlannedExternalAction {
+  const metadata = scored.metadata ?? candidateMetadata(scored, personaMode);
   if (scored.candidate.kind === "input") {
     return {
       type: "fill",
       candidate: scored.candidate,
       value: fillValueFor(scored.candidate, goal),
       reason: scored.reason,
-      score: scored.score
+      score: scored.score,
+      ...metadata
     };
   }
 
@@ -191,7 +230,8 @@ function planForScoredCandidate(scored: ScoredCandidate, goal: string): PlannedE
     type: "click",
     candidate: scored.candidate,
     reason: scored.reason,
-    score: scored.score
+    score: scored.score,
+    ...metadata
   };
 }
 
@@ -199,6 +239,7 @@ type ScoredCandidate = {
   candidate: ExternalCandidate;
   reason: string;
   score: number;
+  metadata?: PlannerMetadata;
 };
 
 function scoreCandidate(
@@ -213,7 +254,8 @@ function scoreCandidate(
 ): ScoredCandidate | undefined {
   const label = normalizeLabel(candidate.label);
   const lowerLabel = label.toLowerCase();
-  if (!label || candidate.disabled || context.usedOrdinals.has(candidate.ordinal) || shouldSkipExternalAction(label) || isCredentialBoundaryLabel(lowerLabel)) {
+  const category = candidate.category ?? categoryForCandidate(candidate);
+  if (!label || candidate.disabled || context.usedOrdinals.has(candidate.ordinal) || category === "unsafe" || shouldSkipExternalAction(label) || isCredentialBoundaryLabel(lowerLabel)) {
     return undefined;
   }
 
@@ -229,7 +271,10 @@ function scoreCandidate(
 
   let score = candidate.kind === "link" ? 10 : candidate.kind === "button" ? 8 : 7;
   const matchedGoalTokens = context.goalTokens.filter((token) => lowerLabel.includes(token));
+  const sectionText = normalizeLabel(`${candidate.sectionLabel ?? ""} ${candidate.nearbyText ?? ""}`).toLowerCase();
+  const matchedContextTokens = context.goalTokens.filter((token) => sectionText.includes(token) && !lowerLabel.includes(token));
   score += matchedGoalTokens.length * 7;
+  score += matchedContextTokens.length * 3;
 
   if (/\b(get started|start|try|demo|learn|learn more|docs|documentation|pricing|create|invite|join|shop|buy|compare|customize|choose|select|configure)\b/i.test(label)) {
     score += 8;
@@ -239,28 +284,80 @@ function scoreCandidate(
     score += 8;
   }
 
+  if (category === "docs" || category === "pricing" || category === "product" || category === "search") {
+    score += 5;
+  }
+
   if (context.personaMode === "impatient" && label.length <= 24) {
     score += 3;
   }
 
-  if (context.personaMode === "mobile" && /\b(menu|open|start|get started)\b/i.test(label)) {
+  if (context.personaMode === "mobile" && (category === "navigation" || /\b(menu|open|start|get started)\b/i.test(label))) {
     score += 4;
   }
 
-  if (context.personaMode === "chaos" && /\b(compare|learn|details|reviews|change|customize|configure|back)\b/i.test(label)) {
+  if (context.personaMode === "chaos" && (category === "product" || /\b(compare|learn|details|reviews|change|customize|configure|back)\b/i.test(label))) {
     score += 4;
   }
 
-  if (/\b(blog|careers|terms|privacy|legal|cookie)\b/i.test(label)) {
+  if (category === "legal" || /\b(blog|careers|terms|privacy|legal|cookie)\b/i.test(label)) {
     score -= 5;
   }
 
   return {
-    candidate,
+    candidate: { ...candidate, category },
     score,
     reason: matchedGoalTokens.length > 0
-      ? `Best safe candidate matched goal token(s): ${matchedGoalTokens.slice(0, 3).join(", ")}.`
-      : `Best safe exploratory candidate: ${label}.`
+      ? `Best safe ${category} candidate matched goal token(s): ${matchedGoalTokens.slice(0, 3).join(", ")}.`
+      : matchedContextTokens.length > 0
+        ? `Best safe ${category} candidate appeared near goal context: ${matchedContextTokens.slice(0, 3).join(", ")}.`
+        : `Best safe ${category} exploratory candidate: ${label}.`
+  };
+}
+
+function candidateMetadata(scored: ScoredCandidate, personaMode: PersonaMode): PlannerMetadata {
+  const persona = personaProfileForMode(personaMode);
+  const candidate = scored.candidate;
+  const label = normalizeLabel(candidate.label);
+  const category = candidate.category ?? categoryForCandidate(candidate);
+  return {
+    observation: `Visible ${candidate.kind} "${label}"${candidate.sectionLabel ? ` in ${candidate.sectionLabel}` : ""}${category !== "unknown" ? ` (${category})` : ""}.`,
+    personaReasoning: `${persona.name} would try this because ${scored.reason.replace(/\.$/, "")}. ${persona.decisionBiases[0] ?? persona.behavioralLens}`,
+    expectedEvidence: category === "search"
+      ? `Search results or filtered content related to the goal.`
+      : candidate.href
+        ? `A safe same-origin page that may reveal ${category} evidence for the goal.`
+        : `A visible page state change showing whether "${label}" advances the goal.`,
+    confidence: Math.max(0.35, Math.min(0.95, scored.score / 40)),
+    stopReason: undefined
+  };
+}
+
+function fallbackMetadata(personaMode: PersonaMode, observation: string, expectedEvidence: string, stopReason: string, confidence: number): PlannerMetadata {
+  const persona = personaProfileForMode(personaMode);
+  return {
+    observation,
+    personaReasoning: `${persona.name} stops because ${persona.stopCriteria[1] ?? persona.stopCriteria[0] ?? "the page does not offer safe evidence"}.`,
+    expectedEvidence,
+    stopReason,
+    confidence
+  };
+}
+
+function metadataFromDecision(decision: AiPlannerDecision, personaMode: PersonaMode): PlannerMetadata {
+  const fallback = fallbackMetadata(
+    personaMode,
+    "AI planner observed the current public page state.",
+    "The next action should reveal goal evidence without crossing safety boundaries.",
+    normalizeReason(decision.stopReason),
+    normalizeConfidence(decision.confidence)
+  );
+  return {
+    observation: normalizeReason(decision.observation) || fallback.observation,
+    personaReasoning: normalizeReason(decision.personaReasoning) || fallback.personaReasoning,
+    expectedEvidence: normalizeReason(decision.expectedEvidence) || fallback.expectedEvidence,
+    stopReason: normalizeReason(decision.stopReason) || undefined,
+    confidence: normalizeConfidence(decision.confidence)
   };
 }
 
@@ -297,6 +394,7 @@ function fillValueFor(candidate: ExternalCandidate, goal: string) {
 }
 
 function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: string; title: string }; history?: string[] }) {
+  const persona = personaProfileForMode(input.personaMode);
   const candidates = input.candidates.slice(0, 50).map((candidate) => ({
     ordinal: candidate.ordinal,
     kind: candidate.kind,
@@ -305,6 +403,9 @@ function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: st
     sameOrigin: candidate.sameOrigin ?? true,
     inputType: candidate.inputType,
     disabled: candidate.disabled,
+    sectionLabel: candidate.sectionLabel,
+    nearbyText: candidate.nearbyText,
+    category: candidate.category ?? categoryForCandidate(candidate),
     blocked: shouldSkipExternalAction(candidate.label) || isCredentialBoundaryLabel(candidate.label.toLowerCase())
   }));
 
@@ -313,7 +414,12 @@ function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: st
       action: "choose_candidate | observe | done | fail",
       ordinal: "required only when action is choose_candidate; must be one of the provided ordinals",
       reason: "short evidence-based reason",
-      evidence: "short page/history evidence for done or fail"
+      evidence: "short page/history evidence for done or fail",
+      observation: "what the current page and candidates suggest",
+      personaReasoning: "why this persona would choose, avoid, or stop",
+      expectedEvidence: "what the action should prove or disprove",
+      stopReason: "required when action is observe, done, or fail",
+      confidence: "number from 0 to 1"
     },
     safetyPolicy: [
       "Choose only a provided candidate ordinal.",
@@ -322,7 +428,7 @@ function buildAiPlannerPrompt(input: PlanExternalActionInput & { page: { url: st
       "If only unsafe commitment actions remain, return observe with a truthful safety reason."
     ],
     goal: input.goal,
-    personaMode: input.personaMode,
+    persona,
     page: input.page,
     history: (input.history ?? []).slice(-8),
     candidates
@@ -345,6 +451,27 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutVal
 
 function normalizeReason(value: unknown) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 220) : "";
+}
+
+function normalizeConfidence(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 0.5;
+}
+
+function categoryForCandidate(candidate: Pick<ExternalCandidate, "label" | "href" | "inputType" | "category" | "sectionLabel" | "nearbyText">): ExternalCandidateCategory {
+  if (candidate.category) return candidate.category;
+  const haystack = `${candidate.label} ${candidate.href ?? ""} ${candidate.inputType ?? ""} ${candidate.sectionLabel ?? ""} ${candidate.nearbyText ?? ""}`.toLowerCase();
+  if (isCredentialBoundaryLabel(candidate.label.toLowerCase()) || shouldSkipExternalAction(candidate.label)) return "unsafe";
+  if (/\b(search|query|find)\b/.test(haystack)) return "search";
+  if (/\b(docs|documentation|api|sdk|install|guide|quickstart|developer)\b/.test(haystack)) return "docs";
+  if (/\b(pricing|plans|cost|billing)\b/.test(haystack)) return "pricing";
+  if (/\b(product|compare|learn|details|features|solutions|templates|macbook|configure|customize|choose|select)\b/.test(haystack)) return "product";
+  if (/\b(shop|buy|store|bag|cart|checkout)\b/.test(haystack)) return "commerce";
+  if (/\b(support|help|contact|sales|demo)\b/.test(haystack)) return "support";
+  if (/\b(login|log in|sign in|signup|sign up|account|trial)\b/.test(haystack)) return "auth";
+  if (/\b(menu|nav|navigation|open|close)\b/.test(haystack)) return "navigation";
+  if (/\b(privacy|terms|legal|cookie|careers)\b/.test(haystack)) return "legal";
+  return "unknown";
 }
 
 function meaningfulTokens(value: string) {

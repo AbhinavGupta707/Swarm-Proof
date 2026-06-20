@@ -1,7 +1,7 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
-import type { WorkerCompleteCallback, WorkerIssueCallback, WorkerRunAgentRequest, WorkerStepCallback } from "@swarmproof/types";
+import { personaProfileForMode, type WorkerCompleteCallback, type WorkerIssueCallback, type WorkerRunAgentRequest, type WorkerStepCallback } from "@swarmproof/types";
 import type { CallbackPoster } from "./deterministic-runner";
-import { isExecutableExternalPlan, planExternalActionWithAi, type ExternalCandidate, type PlannedExternalAction } from "./external-planner";
+import { isExecutableExternalPlan, planExternalActionWithAi, type ExternalCandidate, type ExternalCandidateCategory, type PlannedExternalAction } from "./external-planner";
 import { commitmentStopReason, hasStrongAuthWallSignals, isCrossOriginNavigation, isUnsafeWorkerUrl, type WorkerSafetyOptions } from "./safety";
 
 type EvidenceState = {
@@ -211,14 +211,15 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   const history: string[] = [];
   let actionsTaken = 0;
   let stoppedForSafety = false;
+  const persona = personaProfileForMode(input.persona.mode);
 
   await page.goto(input.targetUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
   visitedHrefs.add(page.url());
   await emitStep(input, postCallback, state, {
     stepIndex: 1,
     action: "goto",
-    thought: "Open the public target URL with safety interception enabled.",
-    result: `Loaded ${await safeTitle(page)}.`,
+    thought: `${persona.name}: ${persona.goalInterpretation}`,
+    result: `Observation: loaded ${await safeTitle(page)} with safety interception enabled. Goal-evidence signal: initial page title and URL are available for this persona.`,
     page
   });
   history.push(`Loaded ${redactUrl(page.url())}.`);
@@ -258,8 +259,8 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
         stepIndex: offset + 2,
         action: "observe",
         status: "warning",
-        thought: "Inspect visible controls within the public-site time budget.",
-        result: "The worker could not read a stable set of safe visible actions before the per-step budget elapsed.",
+        thought: `${persona.name} could not form a safe next action within the page budget.`,
+        result: "Observation: the worker could not read a stable set of safe visible actions before the per-step budget elapsed. Confusion signal: no reliable visible control set.",
         page
       });
       issues.push({
@@ -289,8 +290,8 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
         stepIndex: offset + 2,
         action: "observe",
         status: "warning",
-        thought: "Inspect visible controls and stop before risky public-site actions.",
-        result: `${await observeInteractiveSurface(page, candidates)} ${commitmentStops.length > 0 ? `Safety stop visible: ${formatCommitmentStops(commitmentStops)}.` : plan.reason}`,
+        thought: formatPlanThought(plan),
+        result: `${await observeInteractiveSurface(page, candidates)} ${commitmentStops.length > 0 ? `Safety stop visible: ${formatCommitmentStops(commitmentStops)}.` : plan.reason} ${formatPlanResultSignal(plan)}`,
         page
       });
       if (commitmentStops.length > 0 && actionsTaken > 0) {
@@ -321,8 +322,8 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
         stepIndex: offset + 2,
         action: "done",
         status: "passed",
-        thought: plan.reason,
-        result: `Planner found enough evidence to stop: ${plan.evidence}`,
+        thought: formatPlanThought(plan),
+        result: `Planner found enough evidence to stop: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
         page
       });
       history.push(`Done: ${plan.evidence}`);
@@ -334,8 +335,8 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
         stepIndex: offset + 2,
         action: "fail",
         status: "failed",
-        thought: plan.reason,
-        result: `Planner could not continue safely: ${plan.evidence}`,
+        thought: formatPlanThought(plan),
+        result: `Planner could not continue safely: ${plan.evidence} ${formatPlanResultSignal(plan)}`,
         page
       });
       issues.push({
@@ -377,8 +378,8 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
       stepIndex: offset + 2,
       action: plan.type === "fill" ? "fill_label" : `click_${plan.candidate.kind}`,
       status: result.ok ? "passed" : "failed",
-      thought: plan.reason,
-      result: result.message,
+      thought: formatPlanThought(plan),
+      result: `${result.message} ${formatPlanResultSignal(plan)}${result.ok ? goalEvidenceSignal(input.goal, page.url(), await safeTitleText(page), history) : " Confusion signal: planned action did not complete."}`,
       page
     });
     history.push(`${plan.type}: ${plan.candidate.label} -> ${result.message}`);
@@ -615,7 +616,7 @@ async function observeInteractiveSurface(page: Page, candidates?: ExternalCandid
     inputs: document.querySelectorAll("input, textarea, select").length
   }));
   const visible = candidates ?? await collectInteractiveCandidates(page, new URL(page.url()).origin);
-  const sample = visible.slice(0, 4).map((candidate) => candidate.label).join(", ");
+  const sample = visible.slice(0, 4).map((candidate) => `${candidate.label}${candidate.category ? ` (${candidate.category})` : ""}`).join(", ");
 
   return `Observed ${counts.links} links, ${counts.buttons} buttons, ${counts.inputs} form fields, and ${visible.length} visible candidate action(s) on ${new URL(page.url()).hostname}.${sample ? ` Examples: ${sample}.` : ""}`;
 }
@@ -652,6 +653,9 @@ async function collectInteractiveCandidates(page: Page, targetOrigin: string): P
         if (!label) {
           return undefined;
         }
+        const sectionLabel = sectionFor(element);
+        const nearbyText = nearbyTextFor(element, label);
+        const category = categoryFor({ label, href: kind === "link" ? anchor.href : undefined, inputType: kind === "input" ? (input.getAttribute("type") ?? tagName).toLowerCase() : undefined, sectionLabel, nearbyText });
 
         const href = kind === "link" ? anchor.href : undefined;
         let sameOrigin = true;
@@ -670,7 +674,10 @@ async function collectInteractiveCandidates(page: Page, targetOrigin: string): P
           href,
           sameOrigin,
           inputType: kind === "input" ? (input.getAttribute("type") ?? tagName).toLowerCase() : undefined,
-          disabled: Boolean((input as HTMLInputElement).disabled || element.getAttribute("aria-disabled") === "true")
+          disabled: Boolean((input as HTMLInputElement).disabled || element.getAttribute("aria-disabled") === "true"),
+          sectionLabel,
+          nearbyText,
+          category
         };
       })
       .filter((candidate): candidate is ExternalCandidate => Boolean(candidate))
@@ -698,6 +705,47 @@ async function collectInteractiveCandidates(page: Page, targetOrigin: string): P
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 100);
+    }
+
+    function sectionFor(element: Element) {
+      const section = element.closest("nav, header, main, section, article, aside, footer, [role='navigation'], [aria-label], [aria-labelledby]");
+      const ariaLabel = section?.getAttribute("aria-label") ?? "";
+      const labelledBy = section?.getAttribute("aria-labelledby") ?? "";
+      const labelledByText = labelledBy
+        ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ")
+        : "";
+      const heading = section?.querySelector("h1,h2,h3,[role='heading']")?.textContent ?? "";
+      return [ariaLabel, labelledByText, heading]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+    }
+
+    function nearbyTextFor(element: Element, label: string) {
+      const parentText = element.parentElement?.textContent ?? element.closest("li, article, section, div")?.textContent ?? "";
+      return parentText
+        .replace(label, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 120);
+    }
+
+    function categoryFor(input: { label: string; href?: string; inputType?: string; sectionLabel?: string; nearbyText?: string }): ExternalCandidateCategory {
+      const haystack = `${input.label} ${input.href ?? ""} ${input.inputType ?? ""} ${input.sectionLabel ?? ""} ${input.nearbyText ?? ""}`.toLowerCase();
+      const labelOnly = input.label.toLowerCase();
+      if (/\b(add to bag|add to cart|checkout|place order|pay|payment|sign up|signup|create account|start trial|free trial|try for free|start deploying|deploy now|contact sales|talk to sales|book demo|request demo|schedule demo|delete|remove|destroy|password|sso|continue with google|continue with github)\b/.test(labelOnly)) return "unsafe";
+      if (/\b(log in|login|sign in|signin|account)\b/.test(haystack)) return "auth";
+      if (/\b(search|query|find)\b/.test(haystack)) return "search";
+      if (/\b(docs|documentation|api|sdk|install|guide|quickstart|developer)\b/.test(haystack)) return "docs";
+      if (/\b(pricing|plans|cost|billing)\b/.test(haystack)) return "pricing";
+      if (/\b(product|compare|learn|details|features|solutions|templates|configure|customize|choose|select|macbook)\b/.test(haystack)) return "product";
+      if (/\b(shop|buy|store|bag|cart|checkout)\b/.test(haystack)) return "commerce";
+      if (/\b(support|help|contact|sales|demo)\b/.test(haystack)) return "support";
+      if (/\b(menu|nav|navigation|open|close)\b/.test(haystack)) return "navigation";
+      if (/\b(privacy|terms|legal|cookie|careers)\b/.test(haystack)) return "legal";
+      return "unknown";
     }
 
     function isVisible(element: Element) {
@@ -868,6 +916,25 @@ export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: 
     if (token === "templates" && /\b(template|templates)\b/.test(haystack)) return true;
     return false;
   });
+}
+
+function formatPlanThought(plan: PlannedExternalAction) {
+  const confidence = `${Math.round(plan.confidence * 100)}%`;
+  return `Observation: ${plan.observation} Persona reasoning: ${plan.personaReasoning} Confidence: ${confidence}.`;
+}
+
+function formatPlanResultSignal(plan: PlannedExternalAction) {
+  const parts = [`Expected evidence: ${plan.expectedEvidence}`];
+  if (plan.stopReason) {
+    parts.push(`Stop reason: ${plan.stopReason}`);
+  }
+  return parts.join(" ");
+}
+
+function goalEvidenceSignal(goal: string, url: string, title: string, history: string[]) {
+  return hasGoalEvidenceForExternalRun(goal, url, title, history)
+    ? " Goal-evidence signal: current URL, title, or action history matches the requested goal."
+    : " Goal-evidence signal: partial only; this step did not yet prove the full goal.";
 }
 
 async function withFallbackTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {

@@ -1,4 +1,4 @@
-import { defaultPersonas, type PersonaConfig, type PersonaMode } from "@swarmproof/types";
+import { defaultPersonas, personaProfileForMode, type PersonaConfig, type PersonaMode } from "@swarmproof/types";
 import { createAiProvider, reportSystemPrompt } from "@swarmproof/ai";
 import { buildEvidencePlaywrightTest } from "@swarmproof/testgen";
 import { Pool, type PoolClient } from "pg";
@@ -1378,6 +1378,9 @@ function buildMarkdownReport(audit: AuditRecord, score: number, outcome: AuditOu
   const issueSections = audit.issues.map((issue, index) => formatIssueEvidence(audit, issue, index + 1)).join("\n\n");
   const artifactLines = audit.artifacts.map((artifact) => formatArtifactReference(audit, artifact)).join("\n");
   const bugExport = audit.issues.map((issue, index) => formatBugExport(audit, issue, index + 1)).join("\n\n");
+  const comparison = formatPersonaComparison(audit);
+  const limitations = formatReportLimitations(audit);
+  const recommendations = formatProductRecommendations(audit);
 
   return `# SwarmProof audit report
 
@@ -1390,8 +1393,17 @@ Evidence: ${pluralize(stats.stepCount, "browser step")} across ${pluralize(stats
 
 ${buildReportSummary(audit)}
 
+## Persona comparison
+${comparison}
+
 ## Persona results
 ${personaSections || "- No persona runs have been recorded yet."}
+
+## Limitations
+${limitations}
+
+## Product recommendations
+${recommendations}
 
 ## Reproduction evidence
 ${issueSections || "- No issues detected in this run."}
@@ -1514,13 +1526,68 @@ function externalStopReason(audit: AuditRecord) {
 }
 
 function formatRunEvidence(audit: AuditRecord, run: AuditRunSummary) {
+  const persona = personaProfileForMode(run.mode);
+  const stopReason = stopReasonForRun(audit, run);
   const steps = (run.steps ?? []).slice(0, 8).map((step) => formatStepEvidence(audit, { run, step })).join("\n");
   return `### ${run.persona}
 - Mode: ${run.mode}
 - Viewport: ${run.viewport ?? "default"}
+- Intent: ${safeLine(persona.goalInterpretation)}
+- Lens: ${safeLine(persona.behavioralLens)}
+- Decision bias: ${safeLine(persona.decisionBiases.slice(0, 2).join("; "))}
+- Likely friction watched: ${safeLine(persona.likelyFrictions.slice(0, 2).join("; "))}
 - Result: ${run.status} - ${safeLine(run.summary || "No run summary recorded.")}
+- Stop reason: ${safeLine(stopReason)}
 - Evidence:
 ${steps || "  - No steps recorded."}`;
+}
+
+function formatPersonaComparison(audit: AuditRecord) {
+  if (audit.runs.length === 0) {
+    return "- No persona runs have been recorded yet.";
+  }
+
+  const statusLine = audit.runs
+    .map((run) => `${run.mode}: ${run.status}`)
+    .join("; ");
+  const divergentStatuses = new Set(audit.runs.map((run) => run.status)).size > 1;
+  const issueCategories = [...new Set(audit.issues.map((issue) => issue.category))];
+  const behaviorLines = audit.runs.map((run) => {
+    const persona = personaProfileForMode(run.mode);
+    const firstSignal = (run.steps ?? []).find((step) => step.thought || step.result);
+    return `- ${run.persona}: ${safeLine(persona.behavioralLens, 150)} ${firstSignal ? `First signal: ${safeLine(firstSignal.thought ?? firstSignal.result, 150)}` : "No step signal captured."}`;
+  }).join("\n");
+
+  return `- Status spread: ${statusLine}.
+- Divergence: ${divergentStatuses ? "Personas ended differently, which points to behavior-dependent friction rather than a single universal outcome." : "Personas ended with the same status, so the strongest signal is shared across behavior modes."}
+- Issue categories compared: ${issueCategories.length > 0 ? issueCategories.join(", ") : "none recorded"}.
+${behaviorLines}`;
+}
+
+function formatReportLimitations(audit: AuditRecord) {
+  const limits = [
+    "This is a bounded public-URL audit, not a claim of human-equivalent usability testing, security scanning, accessibility certification, or private-app coverage.",
+    "SwarmProof does not use credentials and stops before signup, login, checkout, payment, contact-sales, booking, destructive, or private-data actions.",
+    audit.provider === "local-playwright"
+      ? "Evidence comes from a constrained local Playwright worker with short step and persona budgets."
+      : "Evidence comes from deterministic fallback or stored callbacks, so live external browser coverage may be limited."
+  ];
+
+  if (!audit.preflight.isDemoTarget) {
+    limits.push("External report conclusions are limited to same-origin public pages reached safely during this run.");
+  }
+
+  return limits.map((item) => `- ${item}`).join("\n");
+}
+
+function formatProductRecommendations(audit: AuditRecord) {
+  if (audit.issues.length === 0) {
+    return "- Keep the public path observable before account creation, and add a regression check around the evidence steps SwarmProof reached.";
+  }
+
+  return audit.issues.slice(0, 5).map((issue) => {
+    return `- ${issue.title}: ${safeLine(issue.suggestedFix ?? implementationHintForIssue(issue), 220)}`;
+  }).join("\n");
 }
 
 function formatIssueEvidence(audit: AuditRecord, issue: AuditIssueSummary, index: number) {
@@ -1586,7 +1653,42 @@ function formatStepEvidence(audit: AuditRecord, evidence: StepEvidence) {
   const artifact = step.artifactId ? `; artifact ${step.artifactId}` : step.screenshotUrl ? "; screenshot captured" : "";
   const location = displayStepLocation(audit, step.url);
   const at = location ? ` at ${location}` : "";
-  return `  - ${run.mode} step ${step.stepIndex}${status}: ${humanizeAction(step.action)} -> ${safeLine(step.result)}${at}${artifact}`;
+  const thought = step.thought ? ` Reasoning: ${safeLine(step.thought, 180)}` : "";
+  return `  - ${run.mode} step ${step.stepIndex}${status}: ${humanizeAction(step.action)} -> ${safeLine(step.result)}${at}${artifact}${thought}`;
+}
+
+function stopReasonForRun(audit: AuditRecord, run: AuditRunSummary) {
+  const stepStop = [...(run.steps ?? [])]
+    .reverse()
+    .map((step) => /Stop reason:\s*([^.;]+(?:[.;]|$))/i.exec(`${step.result} ${step.thought ?? ""}`)?.[1])
+    .find((value): value is string => Boolean(value));
+  if (stepStop) {
+    return stepStop;
+  }
+
+  const runStepIds = new Set((run.steps ?? []).map((step) => step.id));
+  const linkedIssue = audit.issues.find((issue) => (issue.evidenceStepIds ?? []).some((stepId) => runStepIds.has(stepId)));
+  if (linkedIssue) {
+    return linkedIssue.category === "Safety stop"
+      ? "Stopped before an irreversible public-site commitment boundary."
+      : linkedIssue.category === "Auth-limited flow"
+        ? "Stopped at an authentication, CAPTCHA, verification, or private-access boundary."
+        : safeLine(linkedIssue.description, 180);
+  }
+
+  if (run.status === "SUCCEEDED") {
+    return "Persona found enough public evidence for this bounded goal.";
+  }
+  if (run.status === "TIMED_OUT") {
+    return "Persona timed out before a terminal worker callback arrived.";
+  }
+  if (run.status === "BLOCKED") {
+    return "Persona stopped because the next step was unsafe, unclear, or unavailable.";
+  }
+  if (run.status === "FAILED") {
+    return "Persona failed after collected evidence showed the path could not continue cleanly.";
+  }
+  return "Persona has not reached a terminal stop reason yet.";
 }
 
 function buildAiReportPrompt(audit: AuditRecord) {
@@ -1599,8 +1701,10 @@ function buildAiReportPrompt(audit: AuditRecord) {
     runs: audit.runs.map((run) => ({
       persona: run.persona,
       mode: run.mode,
+      profile: personaProfileForMode(run.mode),
       status: run.status,
       summary: safeLine(run.summary, 300),
+      stopReason: stopReasonForRun(audit, run),
       steps: (run.steps ?? []).map((step) => ({
         id: step.id,
         stepIndex: step.stepIndex,
@@ -2040,14 +2144,7 @@ function normalizeArtifactKind(value: string): ArtifactKind {
 function personaForMode(mode: PersonaMode): PersonaConfig {
   const existing = defaultPersonas.find((persona) => persona.mode === mode);
   if (existing) return existing;
-
-  return {
-    id: mode,
-    mode,
-    name: mode === "accessibility_lite" ? "Accessibility-lite user" : "Impatient user",
-    viewport: { width: 1280, height: 800 },
-    behaviorRules: ["Attempt the goal and report friction clearly."]
-  };
+  return personaProfileForMode(mode);
 }
 
 function isPrivateOrInternalHost(host: string) {

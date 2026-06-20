@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { personaProfileForMode } from "@swarmproof/types";
 import {
   appendEvent,
   blockWorkerAuditRun,
@@ -77,6 +78,20 @@ test("default audit run creates normal, mobile, and chaos personas", () => {
   assert.equal(overview.provider, "demo");
 });
 
+test("persona profiles define distinct external-audit reasoning lenses", () => {
+  const normal = personaProfileForMode("normal");
+  const mobile = personaProfileForMode("mobile");
+  const chaos = personaProfileForMode("chaos");
+
+  assert.match(normal.behavioralLens, /first-time/i);
+  assert.match(mobile.behavioralLens, /Narrow-screen/i);
+  assert.match(chaos.behavioralLens, /Impatient/i);
+  assert.notEqual(normal.goalInterpretation, mobile.goalInterpretation);
+  assert.equal(normal.decisionBiases.length >= 3, true);
+  assert.equal(mobile.likelyFrictions.some((item) => /navigation|touch|overflow|CTA/i.test(item)), true);
+  assert.equal(chaos.stopCriteria.some((item) => /commitment|auth|private/i.test(item)), true);
+});
+
 test("generated Playwright output includes navigation, action, and assertion", () => {
   resetMemoryStoreForTests();
   const created = createAudit({
@@ -143,6 +158,9 @@ test("evidence report synthesis links worker steps, artifacts, bug export, and g
   const overview = getAuditOverview(created.audit.id);
   assert.match(overview.report?.summary ?? "", /evidence-backed trace/);
   assert.match(overview.report?.markdown ?? "", /## Persona results/);
+  assert.match(overview.report?.markdown ?? "", /## Persona comparison/);
+  assert.match(overview.report?.markdown ?? "", /## Limitations/);
+  assert.match(overview.report?.markdown ?? "", /## Product recommendations/);
   assert.match(overview.report?.markdown ?? "", /## Reproduction evidence/);
   assert.match(overview.report?.markdown ?? "", /## Bug export/);
   assert.match(overview.report?.markdown ?? "", /Invite teammate CTA is hard to recognize/);
@@ -242,11 +260,117 @@ test("external evidence reports and generated tests use target-specific evidence
   assert.equal(overview.issues.length, 1);
   assert.equal(overview.issues[0]?.evidenceStepIds?.length, 3);
   assert.match(overview.report?.summary ?? "", /Safety stop/);
+  assert.match(overview.report?.markdown ?? "", /## Persona comparison/);
+  assert.match(overview.report?.markdown ?? "", /Stop reason/);
+  assert.match(overview.report?.markdown ?? "", /This is a bounded public-URL audit/);
+  assert.match(overview.report?.markdown ?? "", /Product recommendations/);
   assert.match(overview.report?.markdown ?? "", /User impact/);
   assert.match(overview.report?.markdown ?? "", /Regression-test note/);
   assert.match(overview.generatedTest, /Buy MacBook Air/);
   assert.match(overview.generatedTest, /Customize/);
   assert.doesNotMatch(overview.generatedTest, /project|people|invite|error/i);
+});
+
+test("external report synthesis compares persona stories and divergence", () => {
+  resetMemoryStoreForTests();
+  const created = createAudit({
+    targetUrl: "https://vercel.com/",
+    goal: "Understand pricing and how to deploy a Next.js app. Stop before signup, login, start deploying, payment, contact sales, or private data.",
+    modes: ["normal", "mobile", "chaos"],
+    baseUrl
+  });
+
+  assert.equal(created.ok, true);
+  if (!created.ok) throw new Error("Audit creation failed");
+
+  runPreflight(created.audit.id);
+  const plan = startWorkerAuditRun(created.audit.id, baseUrl);
+  const [normalRunId, mobileRunId, chaosRunId] = plan.runIds;
+  assert.ok(normalRunId);
+  assert.ok(mobileRunId);
+  assert.ok(chaosRunId);
+
+  const normalStep = recordWorkerStep({
+    auditId: created.audit.id,
+    runId: normalRunId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "passed",
+    thought: "Observation: visible Pricing link. Persona reasoning: Normal evaluator follows direct pricing information scent. Confidence: 85%.",
+    result: "Clicked \"Pricing\". Navigated to https://vercel.com/pricing. Expected evidence: pricing tiers. Goal-evidence signal: current URL matches pricing.",
+    url: "https://vercel.com/pricing"
+  });
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId: normalRunId,
+    success: true,
+    status: "SUCCEEDED",
+    summary: "Normal evaluator found pricing evidence without crossing signup."
+  });
+
+  const mobileStep = recordWorkerStep({
+    auditId: created.audit.id,
+    runId: mobileRunId,
+    stepIndex: 1,
+    action: "observe",
+    status: "warning",
+    thought: "Observation: collapsed menu and dense hero. Persona reasoning: Mobile evaluator needs obvious navigation. Confidence: 64%.",
+    result: "Observed menu and pricing candidate. Expected evidence: mobile navigation path. Stop reason: signup and deploy CTAs dominated the viewport.",
+    url: "https://vercel.com/"
+  });
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId: mobileRunId,
+    success: false,
+    status: "BLOCKED",
+    summary: "Mobile evaluator stopped because safe public navigation was visually crowded.",
+    issues: [{
+      severity: "LOW",
+      category: "Agent uncertainty",
+      title: "Mobile safe path is easy to miss",
+      description: "The mobile persona saw competing deploy and signup CTAs before pricing evidence.",
+      evidenceStepIds: [mobileStep.id],
+      suggestedFix: "Make Pricing and Docs visible in the mobile menu before account-start actions."
+    }]
+  });
+
+  const chaosStep = recordWorkerStep({
+    auditId: created.audit.id,
+    runId: chaosRunId,
+    stepIndex: 1,
+    action: "click_link",
+    status: "warning",
+    thought: "Observation: Templates and Docs both look plausible. Persona reasoning: Chaos explorer probes safe adjacent routes. Confidence: 71%.",
+    result: "Clicked \"Templates\". Expected evidence: deployment examples. Stop reason: next visible Start Deploying action is blocked.",
+    url: "https://vercel.com/templates"
+  });
+  completeWorkerRun({
+    auditId: created.audit.id,
+    runId: chaosRunId,
+    success: false,
+    status: "BLOCKED",
+    summary: "Chaos explorer reached templates but stopped before Start Deploying.",
+    issues: [{
+      severity: "LOW",
+      category: "Safety stop",
+      title: "Template path stops before deployment start",
+      description: "The chaos persona reached templates and stopped at a blocked Start Deploying commitment.",
+      evidenceStepIds: [chaosStep.id],
+      suggestedFix: "Offer a public read-only deployment walkthrough before Start Deploying."
+    }]
+  });
+
+  const overview = getAuditOverview(created.audit.id);
+  const markdown = overview.report?.markdown ?? "";
+  assert.match(markdown, /## Persona comparison/);
+  assert.match(markdown, /Divergence: Personas ended differently/);
+  assert.match(markdown, /Normal evaluator/);
+  assert.match(markdown, /Mobile evaluator/);
+  assert.match(markdown, /Chaos explorer/);
+  assert.match(markdown, /Stop reason/);
+  assert.match(markdown, /## Limitations/);
+  assert.match(markdown, /## Product recommendations/);
+  assert.doesNotMatch(overview.generatedTest, /demo-target|invite|people/i);
 });
 
 test("AI report synthesis falls back deterministically when no provider key is configured", async () => {
