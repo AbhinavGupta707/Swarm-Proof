@@ -77,6 +77,15 @@ test("external run does not stop on generic pages without goal evidence", () => 
     ),
     false
   );
+  assert.equal(
+    hasGoalEvidenceForExternalRun(
+      "Find the Next.js quickstart and installation instructions for Supabase.",
+      "https://supabase.com/docs/guides/getting-started/quickstarts/tanstack",
+      "Use Supabase with TanStack Start | Supabase Docs",
+      ["Clicked TanStack Start."]
+    ),
+    false
+  );
 });
 
 test("external run accepts specific install or comparison goal evidence", () => {

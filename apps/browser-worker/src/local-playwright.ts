@@ -211,6 +211,7 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   const history: string[] = [];
   let actionsTaken = 0;
   let stoppedForSafety = false;
+  let goalEvidenceReached = false;
   const persona = personaProfileForMode(input.persona.mode);
 
   await page.goto(input.targetUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
@@ -318,6 +319,7 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
 
     if (plan.type === "done") {
+      goalEvidenceReached = true;
       await emitStep(input, postCallback, state, {
         stepIndex: offset + 2,
         action: "done",
@@ -397,6 +399,7 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
     }
 
     if (hasGoalEvidenceForExternalRun(input.goal, page.url(), await safeTitleText(page), history)) {
+      goalEvidenceReached = true;
       history.push(`Goal evidence reached on ${redactUrl(page.url())}.`);
       break;
     }
@@ -420,12 +423,25 @@ async function runExternalPublicFlow(input: WorkerRunAgentRequest, page: Page, p
   }
 
   addConsoleAndNetworkIssues(issues, state);
+  if (!goalEvidenceReached && actionsTaken > 0 && !issues.some((issue) => issue.category === "Auth-limited flow" || issue.category === "Safety stop")) {
+    issues.push({
+      severity: "LOW",
+      category: "Goal evidence",
+      title: "Goal evidence was not reached within the safe step budget",
+      description: "The worker explored safe public pages but did not collect enough specific evidence for the requested goal before the persona step budget ended.",
+      evidenceStepIds: [...state.stepIds],
+      suggestedFix: "Start from a more specific public URL, expose a clearer public docs/navigation path, or increase the future step budget for this target."
+    });
+  }
   const authLimited = issues.some((issue) => issue.category === "Auth-limited flow");
+  const missedGoal = issues.some((issue) => issue.category === "Goal evidence");
   await complete(input, postCallback, state, {
-    success: !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL"),
-    status: authLimited || stoppedForSafety ? "BLOCKED" : "SUCCEEDED",
+    success: goalEvidenceReached && !authLimited && !stoppedForSafety && !issues.some((issue) => issue.severity === "HIGH" || issue.severity === "CRITICAL"),
+    status: authLimited || stoppedForSafety || missedGoal ? "BLOCKED" : "SUCCEEDED",
     summary: stoppedForSafety
       ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), then stopped before cart, checkout, payment, or private-data commitment.`
+      : missedGoal
+        ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s), but did not reach enough specific evidence for the goal.`
       : actionsTaken > 0
       ? `The local Playwright worker safely executed ${actionsTaken} public-site action(s).`
       : "The local Playwright worker loaded the public URL but stopped before unsafe or irrelevant actions.",
@@ -914,12 +930,25 @@ export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: 
     if (tokenMatchesEvidence(token, haystack)) return true;
     return false;
   });
+  const normalizedMatches = new Set(matches.map(normalizeGoalToken));
+
+  if (requiresFrameworkSpecificEvidence(tokens)) {
+    return (
+      (normalizedMatches.has("nextjs") || normalizedMatches.has("next")) &&
+      (normalizedMatches.has("install") || normalizedMatches.has("quickstart") || normalizedMatches.has("setup"))
+    );
+  }
 
   if (matches.length >= 2) {
     return true;
   }
 
-  return matches.some((token) => HIGH_INTENT_GOAL_TOKENS.has(normalizeGoalToken(token)));
+  return [...normalizedMatches].some((token) => HIGH_INTENT_GOAL_TOKENS.has(token));
+}
+
+function requiresFrameworkSpecificEvidence(tokens: string[]) {
+  const normalized = new Set(tokens.map(normalizeGoalToken));
+  return (normalized.has("next") || normalized.has("nextjs")) && (normalized.has("install") || normalized.has("quickstart") || normalized.has("setup"));
 }
 
 function tokenMatchesEvidence(token: string, haystack: string) {
@@ -932,8 +961,12 @@ function tokenMatchesEvidence(token: string, haystack: string) {
 
 function normalizeGoalToken(token: string) {
   if (token === "documentation") return "docs";
+  if (token === "next" || token === "nextjs") return token;
+  if (token.startsWith("install")) return "install";
   if (token.startsWith("deploy")) return "deploy";
   if (token.startsWith("template")) return "template";
+  if (token.startsWith("quickstart")) return "quickstart";
+  if (token === "setup") return "setup";
   if (token === "models") return "model";
   return token;
 }
