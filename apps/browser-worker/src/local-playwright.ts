@@ -949,12 +949,25 @@ export function hasGoalEvidenceForExternalRun(goal: string, url: string, title: 
     return true;
   }
 
-  return matches.some((token) => HIGH_INTENT_GOAL_TOKENS.has(normalizeGoalToken(token)) && tokenMatchesEvidence(token, pageSignal));
+  if (matches.some((token) => SINGLE_TOKEN_TERMINAL_EVIDENCE.has(normalizeGoalToken(token)) && tokenMatchesEvidence(token, pageSignal))) {
+    return true;
+  }
+
+  return hasSpecificComparisonEvidence(tokens, pageSignal);
 }
 
 function requiresFrameworkSpecificEvidence(tokens: string[]) {
   const normalized = new Set(tokens.map(normalizeGoalToken));
   return (normalized.has("next") || normalized.has("nextjs")) && (normalized.has("install") || normalized.has("quickstart") || normalized.has("setup"));
+}
+
+function hasSpecificComparisonEvidence(tokens: string[], pageSignal: string) {
+  const normalized = new Set(tokens.map(normalizeGoalToken));
+  if (!normalized.has("compare")) return false;
+
+  const pageShowsComparison = /\bcompar(e|ison|ing)\b/.test(pageSignal);
+  const pageShowsProductFamily = /\b(macbook|mac\s+(models?|computers?)|iphone|ipad|pricing|plans?)\b/.test(pageSignal);
+  return pageShowsComparison && pageShowsProductFamily;
 }
 
 function tokenMatchesEvidence(token: string, haystack: string) {
@@ -1044,6 +1057,9 @@ const EXTERNAL_GOAL_STOP_WORDS = new Set([
   "product",
   "website",
   "information",
+  "learn",
+  "user",
+  "where",
   "quickest"
 ]);
 
@@ -1058,6 +1074,8 @@ const HIGH_INTENT_GOAL_TOKENS = new Set([
   "template",
   "macbook"
 ]);
+
+const SINGLE_TOKEN_TERMINAL_EVIDENCE = new Set(["pricing"]);
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutError: Error): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

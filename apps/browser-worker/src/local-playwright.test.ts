@@ -95,6 +95,15 @@ test("external run does not stop on generic pages without goal evidence", () => 
     ),
     false
   );
+  assert.equal(
+    hasGoalEvidenceForExternalRun(
+      "Compare MacBook Air options and find where a user would learn pricing and configuration choices.",
+      "https://www.apple.com/macbook-neo/",
+      "MacBook Neo - Apple",
+      ["Clicked Learn more, MacBook Neo."]
+    ),
+    false
+  );
 });
 
 test("external run accepts specific install or comparison goal evidence", () => {
